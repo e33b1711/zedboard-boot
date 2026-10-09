@@ -4,7 +4,7 @@
 *.xsa
 *.xsa.bak-*
 # Vitis-HLS-Projekt (build_hls.tcl)
-/hls/proj/
+/hls/proj_*/
 # PetaLinux-Projekt (build_petalinux.sh)
 /zedboard-plnx/
 # Simulation (sim/run_sim.sh)

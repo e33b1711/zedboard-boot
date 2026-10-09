@@ -4,11 +4,12 @@
 #  Aufruf:  vivado -mode batch -source create_hw.tcl
 #  Ergebnis: ./system.xsa  (inkl. Bitstream) fuer PetaLinux
 #
-#  Vorher:  vitis-run --mode hls --tcl build_hls.tcl   (erzeugt die sine_gen-IP)
+#  Vorher:  vitis-run --mode hls --tcl build_hls.tcl   (erzeugt die HLS-IPs)
 #
 #  Inhalt:  Zynq PS7 mit ZedBoard-Preset (DDR, MIO, UART, SD, ETH, USB)
 #           + AXI-GPIO an den 8 User-LEDs
 #           + Sinuston auf Line Out: HLS-Sinus-Generator -> I2S -> ADAU1761
+#           + HDMI-Testbild 720p60: HLS-Testbild-Generator -> Video Out -> ADV7511
 # =============================================================================
 
 set proj_name zedboard_hw
@@ -50,14 +51,18 @@ create_project $proj_name $proj_dir -part $part -force
 set_property board_part $bp [current_project]
 
 # --- Eigene Quellen: HLS-IP, Verilog, Constraints ---------------------------
-set hls_ip [file normalize ./hls/proj/solution1/impl/ip]
-if {![file exists $hls_ip/component.xml]} {
-    error "HLS-IP fehlt ($hls_ip). Zuerst: vitis-run --mode hls --tcl build_hls.tcl"
+set hls_ips {}
+foreach core {sine_gen pattern_gen} {
+    set hls_ip [file normalize ./hls/proj_$core/solution1/impl/ip]
+    if {![file exists $hls_ip/component.xml]} {
+        error "HLS-IP fehlt ($hls_ip). Zuerst: vitis-run --mode hls --tcl build_hls.tcl"
+    }
+    lappend hls_ips $hls_ip
 }
-set_property ip_repo_paths $hls_ip [current_project]
+set_property ip_repo_paths $hls_ips [current_project]
 update_ip_catalog
-add_files -norecurse [file normalize ./rtl/i2s_tx.v]
-add_files -fileset constrs_1 -norecurse [file normalize ./constraints/audio.xdc]
+add_files -norecurse [list [file normalize ./rtl/i2s_tx.v] [file normalize ./rtl/clk_fwd.v]]
+add_files -fileset constrs_1 -norecurse [list [file normalize ./constraints/audio.xdc] [file normalize ./constraints/hdmi.xdc]]
 update_compile_order -fileset sources_1
 
 # --- Block Design -----------------------------------------------------------
@@ -134,6 +139,86 @@ connect_bd_intf_net [get_bd_intf_pins axis_cdc/M_AXIS] [get_bd_intf_pins i2s_tx/
 foreach {port pin} {ac_mclk i2s_mclk ac_bclk i2s_bclk ac_lrclk i2s_lrclk ac_sdata i2s_sdata} {
     create_bd_port -dir O $port
     connect_bd_net [get_bd_pins i2s_tx/$pin] [get_bd_ports $port]
+}
+
+# --- HDMI: Testbild-Generator (HLS) -> Video Out -> ADV7511 -------------------
+#   Bildauswahl: AXI-Lite-Register des HLS-Cores (pattern 0x10, color 0x18, format 0x20)
+#   1280x720 bei 60 Hz, Pixeltakt 74,25 MHz, 16 Bit YCbCr 4:2:2
+#   Kein Linux-Treiber: der ADV7511 wird per Skript ueber I2C eingerichtet
+
+# ADV7511-I2C: PS-I2C1 ueber EMIO auf PL-Pins
+set_property -dict [list CONFIG.PCW_I2C1_PERIPHERAL_ENABLE {1} CONFIG.PCW_I2C1_I2C1_IO {EMIO}] [get_bd_cells ps7]
+create_bd_intf_port -mode Master -vlnv xilinx.com:interface:iic_rtl:1.0 hd_iic
+connect_bd_intf_net [get_bd_intf_pins ps7/IIC_1] [get_bd_intf_ports hd_iic]
+
+# Pixeltakt 74,25 MHz und zugehoeriger Reset
+create_bd_cell -type ip -vlnv [latest_ip clk_wiz] video_clk
+set_property -dict [list \
+    CONFIG.PRIM_SOURCE {Global_buffer} \
+    CONFIG.PRIM_IN_FREQ {100.000} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {74.25} \
+    CONFIG.USE_RESET {false} \
+    CONFIG.USE_LOCKED {true}] [get_bd_cells video_clk]
+connect_bd_net $fclk [get_bd_pins video_clk/clk_in1]
+set pclk [get_bd_pins video_clk/clk_out1]
+
+create_bd_cell -type ip -vlnv [latest_ip proc_sys_reset] video_rst
+connect_bd_net $pclk [get_bd_pins video_rst/slowest_sync_clk]
+connect_bd_net [get_bd_pins ps7/FCLK_RESET0_N] [get_bd_pins video_rst/ext_reset_in]
+connect_bd_net [get_bd_pins video_clk/locked] [get_bd_pins video_rst/dcm_locked]
+set prstn [get_bd_pins video_rst/peripheral_aresetn]
+
+# Testbild-Generator (HLS-IP) im Pixeltakt; Takt vor der Automation anschliessen,
+# damit der AXI-Interconnect den Taktuebergang zum 100-MHz-Bus uebernimmt
+create_bd_cell -type ip -vlnv [latest_ip pattern_gen] pattern_gen
+connect_bd_net $pclk  [get_bd_pins pattern_gen/ap_clk]
+connect_bd_net $prstn [get_bd_pins pattern_gen/ap_rst_n]
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins pattern_gen/s_axi_ctrl]
+if {[get_bd_nets -of_objects [get_bd_pins pattern_gen/ap_clk]] ne [get_bd_nets -of_objects $pclk]} {
+    error "pattern_gen laeuft nicht im Pixeltakt"
+}
+
+# Timing-Generator 720p60 (feste Einstellung, ohne AXI-Lite)
+create_bd_cell -type ip -vlnv [latest_ip v_tc] video_tc
+set_property -dict [list \
+    CONFIG.VIDEO_MODE {720p} \
+    CONFIG.HAS_AXI4_LITE {false} \
+    CONFIG.enable_detection {false}] [get_bd_cells video_tc]
+connect_bd_net $pclk  [get_bd_pins video_tc/clk]
+connect_bd_net $prstn [get_bd_pins video_tc/resetn]
+
+# AXI4-Stream -> Video mit Sync-Signalen; bremst den Generator ueber tready
+create_bd_cell -type ip -vlnv [latest_ip v_axi4s_vid_out] video_out
+set_property -dict [list \
+    CONFIG.C_S_AXIS_VIDEO_FORMAT {0} \
+    CONFIG.C_S_AXIS_VIDEO_DATA_WIDTH {8} \
+    CONFIG.C_NATIVE_COMPONENT_WIDTH {8} \
+    CONFIG.C_HAS_ASYNC_CLK {0} \
+    CONFIG.C_VTG_MASTER_SLAVE {0}] [get_bd_cells video_out]
+if {[get_property LEFT [get_bd_pins video_out/vid_data]] != 15} {
+    error "video_out: Datenbreite ist nicht 16 Bit"
+}
+connect_bd_net $pclk  [get_bd_pins video_out/aclk]
+connect_bd_net $prstn [get_bd_pins video_out/aresetn]
+connect_bd_intf_net [get_bd_intf_pins pattern_gen/m_axis_video] [get_bd_intf_pins video_out/video_in]
+connect_bd_intf_net [get_bd_intf_pins video_tc/vtiming_out] [get_bd_intf_pins video_out/vtiming_in]
+connect_bd_net [get_bd_pins video_out/vtg_ce] [get_bd_pins video_tc/gen_clken]
+connect_bd_net [get_bd_pins video_out/sof_state_out] [get_bd_pins video_tc/sof_state]
+
+# Pixeltakt invertiert auf den Pin
+create_bd_cell -type module -reference clk_fwd hd_clk_fwd
+connect_bd_net $pclk [get_bd_pins hd_clk_fwd/clk]
+
+# ADV7511-Pins
+create_bd_port -dir O hd_clk
+connect_bd_net [get_bd_pins hd_clk_fwd/clk_out] [get_bd_ports hd_clk]
+create_bd_port -dir O -from 15 -to 0 hd_d
+connect_bd_net [get_bd_pins video_out/vid_data] [get_bd_ports hd_d]
+foreach {port pin} {hd_de vid_active_video hd_hsync vid_hsync hd_vsync vid_vsync} {
+    create_bd_port -dir O $port
+    connect_bd_net [get_bd_pins video_out/$pin] [get_bd_ports $port]
 }
 
 assign_bd_address

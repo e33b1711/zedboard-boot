@@ -1,7 +1,8 @@
 # ZedBoard – Boot-Konfiguration from scratch (Vivado + PetaLinux, SD-Boot)
 
 Getestet mit Vivado 2025.2 und PetaLinux 2025.2 auf Linux Mint 22.3 (Ubuntu-24.04-Basis):
-Board bootet von SD bis zum Login, Ethernet funktioniert, Sinuston auf Line Out ist hörbar.
+Board bootet von SD bis zum Login, Ethernet funktioniert, Sinuston auf Line Out ist hörbar,
+HDMI-Testbilder (alle sechs, Farben korrekt mit `format 0`) auf dem Monitor geprüft.
 
 ## Boot-Kette
 
@@ -17,12 +18,13 @@ BootROM ──► FSBL ──► Bitstream (PL) ──► U-Boot ──► boot.
 
 | Datei               | Zweck                                                        |
 |---------------------|--------------------------------------------------------------|
-| `build_hls.tcl`     | Vitis HLS: Sinus-Generator `hls/sine_gen.cpp` → C-Simulation, Synthese, Vivado-IP |
-| `create_hw.tcl`     | Vivado-Projekt: PS7 mit ZedBoard-Preset, AXI-GPIO (LEDs), Sinuston-Kette, Bitstream, `system.xsa` |
+| `build_hls.tcl`     | Vitis HLS: `hls/sine_gen.cpp` (Sinus) und `hls/pattern_gen.cpp` (HDMI-Testbild) → C-Simulation, Synthese, Vivado-IP |
+| `create_hw.tcl`     | Vivado-Projekt: PS7 mit ZedBoard-Preset, AXI-GPIO (LEDs), Sinuston- und HDMI-Kette, Bitstream, `system.xsa` |
 | `rtl/i2s_tx.v`      | I2S-Sender (Verilog) für den Audio-Codec; Testbench in `sim/` |
-| `constraints/audio.xdc` | Pins des Audio-Codecs ADAU1761 |
+| `rtl/clk_fwd.v`     | Takt-Ausgabe über ODDR (HDMI-Pixeltakt) |
+| `constraints/audio.xdc`, `hdmi.xdc` | Pins des Audio-Codecs ADAU1761 und des HDMI-Senders ADV7511 |
 | `build_petalinux.sh`| PetaLinux-Projekt aus XSA, ext4-Rootfs auf SD, Build, `BOOT.BIN`, `.wic` |
-| `target/`           | Skripte fürs Board (`codec_init.sh`, `set_freq.sh`) und ihr Rezept; landen in `/usr/bin` |
+| `target/`           | Skripte fürs Board (`codec_init.sh`, `set_freq.sh`, `hdmi_init.sh`, `set_pattern.sh`) und ihr Rezept; landen in `/usr/bin` |
 | `system-user.dtsi`  | Device-Tree-Ergänzungen (Konsole, Ethernet-PHY, SD)          |
 | `prepare_sd.sh`     | SD-Karte manuell partitionieren und befüllen (bisher nicht getestet) |
 
@@ -65,9 +67,9 @@ PetaLinux-Installation (nicht als root; `--platform "arm"` = nur Zynq-7000):
 Installationspfade auf diesem Rechner: Vivado `~/tools/amd/2025.2/Vivado`, PetaLinux `~/tools/amd/petalinux`.
 
 ```bash
-# 1. HLS-IP und Hardware (je ca. 3 min)
+# 1. HLS-IPs (ca. 5 min) und Hardware (ca. 4 min)
 source ~/tools/amd/2025.2/Vitis/settings64.sh
-vitis-run --mode hls --tcl build_hls.tcl            # -> hls/proj/solution1/impl/ip
+vitis-run --mode hls --tcl build_hls.tcl            # -> hls/proj_<core>/solution1/impl/ip
 source ~/tools/amd/2025.2/Vivado/settings64.sh
 vivado -mode batch -source create_hw.tcl            # -> system.xsa
 
@@ -118,6 +120,8 @@ Zum Vergleich mit dem Schaltplan: ZedBoard Hardware User's Guide, Abschnitt „C
 | LEDs LD0–LD7      | AXI-GPIO `leds` auf `0x41200000`, 8 Bit, nur Ausgang |
 | Sinus-Generator   | HLS-Core `sine_gen` auf `0x40000000`, Register `phase_inc` bei Offset `0x10` |
 | Audio-Codec ADAU1761 | I2S aus `i2s_tx`, I2C über PS-I2C0 (EMIO), Adresse `0x38` |
+| Testbild-Generator | HLS-Core `pattern_gen` auf `0x40010000`, Register `pattern` `0x10`, `color` `0x18`, `format` `0x20` |
+| HDMI-Sender ADV7511 | 16 Bit YCbCr 4:2:2 + Syncs aus `video_out`, I2C über PS-I2C1 (EMIO), Adresse `0x39` |
 | DIP-Schalter, Taster | nicht angeschlossen (Board-Interfaces `sws_8bits`, `btns_5bits` wären verfügbar) |
 
 LED-Test über sysfs (als root; `gpioset`/libgpiod ist nicht im Rootfs):
@@ -156,9 +160,51 @@ set_freq.sh 0        # Stille
 Tests ohne Board:
 
 ```bash
-vitis-run --mode hls --tcl build_hls.tcl    # enthält die C-Simulation von sine_gen ("TEST OK")
+vitis-run --mode hls --tcl build_hls.tcl    # enthält die C-Simulationen beider HLS-Cores ("TEST OK")
 bash sim/run_sim.sh                         # i2s_tx im Vivado-Simulator ("TEST OK")
 ```
+
+## Testbild auf HDMI
+
+```
+Linux ──AXI-Lite (pattern, color)──► pattern_gen (HLS) ──AXI-Stream-Video──► AXI4-Stream to Video Out ──► ADV7511 ──► HDMI
+                                                          Video Timing Controller ──┘ (HSYNC, VSYNC, DE)
+PS-I2C1 (EMIO) ──────────────────────────────────────────────────────── ADV7511-Register ──┘
+Clocking Wizard: 100 MHz ──► 74,25 MHz Pixeltakt
+```
+
+- Feste Auflösung 1280×720 bei 60 Hz. Für Linux gibt es kein Display: kein Treiber, kein Framebuffer,
+  kein Device-Tree-Knoten für den ADV7511. Gesteuert wird nur über die beiden Skripte.
+- `pattern_gen` erzeugt pro Takt ein Pixel, rechnet das Testbild in RGB und gibt es als
+  YCbCr 4:2:2 (BT.709, begrenzter Wertebereich) aus, weil auf dem ZedBoard nur 16 Datenleitungen
+  zum ADV7511 führen. Der ADV7511 wandelt wieder nach RGB.
+- Registeränderungen werden am Bildanfang übernommen, das Bild wechselt also nie mittendrin.
+- Der ADV7511 muss nach jedem Boot einmal per I2C eingerichtet werden. Das geht auch ohne Monitor;
+  späteres An- und Umstecken funktioniert ohne erneutes `hdmi_init.sh` (getestet).
+
+| `pattern` | Testbild |
+|-----------|----------|
+| 0 | schwarz (Zustand nach Reset) |
+| 1 | 8 Farbbalken: weiß, gelb, cyan, grün, magenta, rot, blau, schwarz |
+| 2 | Graukeil horizontal |
+| 3 | Schachbrett, 64 Pixel |
+| 4 | Vollfläche in der Farbe aus `color` (`0xRRGGBB`) |
+| 5 | weißes Quadrat, das über dunkelblauen Hintergrund wandert |
+
+Auf dem Board (als root):
+
+```bash
+hdmi_init.sh               # ADV7511 einrichten, meldet ob ein Monitor erkannt wurde
+set_pattern.sh 1           # Farbbalken
+set_pattern.sh 4 ff8000    # Vollfläche orange
+set_pattern.sh             # aktuelle Einstellung anzeigen
+```
+
+Zur Fehlersuche an der Datenstrecke lässt sich die Byte-Reihenfolge ohne Neubau ändern:
+`set_pattern.sh format N` mit Bit 0 = Cb/Cr tauschen, Bit 1 = Y und Cb/Cr tauschen.
+
+Die C-Simulation schreibt alle Testbilder als `pattern<n>.ppm` nach
+`hls/proj_pattern_gen/solution1/csim/build/`.
 
 ## Typische Anpassungen
 
@@ -181,6 +227,9 @@ bash sim/run_sim.sh                         # i2s_tx im Vivado-Simulator ("TEST 
 | `VFS: Unable to mount root fs`            | Rootfs nicht auf `mmcblk0p2`, oder Image noch als initramfs konfiguriert |
 | Ethernet ohne Link                        | PHY-Knoten in `system-user.dtsi`, `phy-mode` prüfen |
 | `xelab`: `cannot find crt1.o`             | Vivado-Simulator findet die System-Bibliotheken nicht: `export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu` (steht in `sim/run_sim.sh`) |
+| HDMI: kein Bild                           | `hdmi_init.sh` gelaufen? Meldet es „Monitor erkannt"? Monitor muss 720p60 können |
+| HDMI: falsche Farben (grün/rosa, rot/blau vertauscht) | Byte-Reihenfolge: `set_pattern.sh format 1`, `2` oder `3` probieren, mit Farbbalken prüfen |
+| HDMI: flimmernde Einzelpixel              | Takt/Daten-Lage: Taktverzögerung im ADV7511 (Register `0xBA`) in `hdmi_init.sh` ändern |
 | `codec_init.sh`: „Codec antwortet nicht"  | Bitstream geladen (ohne MCLK reagiert der Codec nicht)? `i2cdetect -y <bus>` muss `38` zeigen |
 
 ## Hinweis zu PetaLinux-Versionen

@@ -59,14 +59,19 @@ if [[ -f "$SCRIPT_DIR/system-user.dtsi" ]]; then
     cp "$SCRIPT_DIR/system-user.dtsi" "$DTSI_DST"
 fi
 
-# --- Sinuston: Skripte (codec_init.sh, set_freq.sh) und i2c-tools ins Rootfs --
-APP_DIR=project-spec/meta-user/recipes-apps/zed-tone
-mkdir -p "$APP_DIR/files"
-cp "$SCRIPT_DIR/target/zed-tone.bb" "$APP_DIR/"
-cp "$SCRIPT_DIR/target/codec_init.sh" "$SCRIPT_DIR/target/set_freq.sh" "$APP_DIR/files/"
+# --- Skripte fuers Board (Sinuston, HDMI-Testbild) und i2c-tools ins Rootfs --
+APP_DIR=project-spec/meta-user/recipes-apps/zed-tools
 USER_ROOTFS=project-spec/meta-user/conf/user-rootfsconfig
-grep -qx 'CONFIG_zed-tone' "$USER_ROOTFS" || echo 'CONFIG_zed-tone' >> "$USER_ROOTFS"
-setcfg CONFIG_zed-tone y "$ROOTFS_CFG"
+# Vorgaenger-Rezept aus aelteren Projektstaenden entfernen
+rm -rf project-spec/meta-user/recipes-apps/zed-tone
+sed -i '/^CONFIG_zed-tone$/d' "$USER_ROOTFS"
+sed -i -E '/^(# )?CONFIG_zed-tone[= ]/d' "$ROOTFS_CFG"
+
+mkdir -p "$APP_DIR/files"
+cp "$SCRIPT_DIR/target/zed-tools.bb" "$APP_DIR/"
+cp "$SCRIPT_DIR"/target/*.sh "$APP_DIR/files/"
+grep -qx 'CONFIG_zed-tools' "$USER_ROOTFS" || echo 'CONFIG_zed-tools' >> "$USER_ROOTFS"
+setcfg CONFIG_zed-tools y "$ROOTFS_CFG"
 setcfg CONFIG_i2c-tools y "$ROOTFS_CFG"
 
 petalinux-config --silentconfig

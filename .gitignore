@@ -1,0 +1,27 @@
+# --- Build-Ergebnisse (alles aus den Skripten reproduzierbar) ----------------
+# Vivado-Projekt (create_hw.tcl) und exportierte Hardware
+/vivado/
+*.xsa
+*.xsa.bak-*
+# Vitis-HLS-Projekt (build_hls.tcl)
+/hls/proj/
+# PetaLinux-Projekt (build_petalinux.sh)
+/zedboard-plnx/
+# Simulation (sim/run_sim.sh)
+/sim/work/
+
+# --- Logs und temporaere Dateien der Xilinx-Tools ----------------------------
+*.log
+*.jou
+*.str
+/logs/
+.Xil/
+xsim.dir/
+*.pb
+*.wdb
+webtalk*
+
+# --- Editor / System ----------------------------------------------------------
+*~
+*.swp
+.vscode/

@@ -4,8 +4,11 @@
 #  Aufruf:  vivado -mode batch -source create_hw.tcl
 #  Ergebnis: ./system.xsa  (inkl. Bitstream) fuer PetaLinux
 #
+#  Vorher:  vitis-run --mode hls --tcl build_hls.tcl   (erzeugt die sine_gen-IP)
+#
 #  Inhalt:  Zynq PS7 mit ZedBoard-Preset (DDR, MIO, UART, SD, ETH, USB)
-#           + AXI-GPIO an den 8 User-LEDs (damit der PL-Teil etwas tut)
+#           + AXI-GPIO an den 8 User-LEDs
+#           + Sinuston auf Line Out: HLS-Sinus-Generator -> I2S -> ADAU1761
 # =============================================================================
 
 set proj_name zedboard_hw
@@ -46,6 +49,17 @@ puts "INFO: Verwende Board-Part $bp"
 create_project $proj_name $proj_dir -part $part -force
 set_property board_part $bp [current_project]
 
+# --- Eigene Quellen: HLS-IP, Verilog, Constraints ---------------------------
+set hls_ip [file normalize ./hls/proj/solution1/impl/ip]
+if {![file exists $hls_ip/component.xml]} {
+    error "HLS-IP fehlt ($hls_ip). Zuerst: vitis-run --mode hls --tcl build_hls.tcl"
+}
+set_property ip_repo_paths $hls_ip [current_project]
+update_ip_catalog
+add_files -norecurse [file normalize ./rtl/i2s_tx.v]
+add_files -fileset constrs_1 -norecurse [file normalize ./constraints/audio.xdc]
+update_compile_order -fileset sources_1
+
 # --- Block Design -----------------------------------------------------------
 create_bd_design system
 
@@ -62,6 +76,65 @@ apply_bd_automation -rule xilinx.com:bd_rule:board \
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
     -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
     [get_bd_intf_pins leds/S_AXI]
+
+# --- Audio: Sinus-Generator (HLS) -> I2S-Sender -> ADAU1761 (Line Out) -------
+#   Frequenz: AXI-Lite-Register phase_inc des HLS-Cores (Offset 0x10)
+#   Takte:    HLS-Core an FCLK0 (100 MHz), I2S an 12,288 MHz (= 256 * 48 kHz)
+set fclk   [get_bd_pins ps7/FCLK_CLK0]
+set rst100 [get_bd_cells -filter {VLNV =~ "*:proc_sys_reset:*"}]
+
+# Codec-I2C: PS-I2C0 ueber EMIO auf PL-Pins
+set_property -dict [list CONFIG.PCW_I2C0_PERIPHERAL_ENABLE {1} CONFIG.PCW_I2C0_I2C0_IO {EMIO}] [get_bd_cells ps7]
+create_bd_intf_port -mode Master -vlnv xilinx.com:interface:iic_rtl:1.0 ac_iic
+connect_bd_intf_net [get_bd_intf_pins ps7/IIC_0] [get_bd_intf_ports ac_iic]
+
+# I2C-Adresspins des Codecs fest auf 0 (Adresse 0x38)
+create_bd_cell -type ip -vlnv [latest_ip xlconstant] ac_addr_const
+set_property -dict [list CONFIG.CONST_WIDTH {2} CONFIG.CONST_VAL {0}] [get_bd_cells ac_addr_const]
+create_bd_port -dir O -from 1 -to 0 ac_addr
+connect_bd_net [get_bd_pins ac_addr_const/dout] [get_bd_ports ac_addr]
+
+# Audio-Takt 12,288 MHz und zugehoeriger Reset
+create_bd_cell -type ip -vlnv [latest_ip clk_wiz] audio_clk
+set_property -dict [list \
+    CONFIG.PRIM_SOURCE {Global_buffer} \
+    CONFIG.PRIM_IN_FREQ {100.000} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {12.288} \
+    CONFIG.USE_RESET {false} \
+    CONFIG.USE_LOCKED {true}] [get_bd_cells audio_clk]
+connect_bd_net $fclk [get_bd_pins audio_clk/clk_in1]
+set aclk [get_bd_pins audio_clk/clk_out1]
+
+create_bd_cell -type ip -vlnv [latest_ip proc_sys_reset] audio_rst
+connect_bd_net $aclk [get_bd_pins audio_rst/slowest_sync_clk]
+connect_bd_net [get_bd_pins ps7/FCLK_RESET0_N] [get_bd_pins audio_rst/ext_reset_in]
+connect_bd_net [get_bd_pins audio_clk/locked] [get_bd_pins audio_rst/dcm_locked]
+
+# Sinus-Generator (HLS-IP aus build_hls.tcl)
+create_bd_cell -type ip -vlnv [latest_ip sine_gen] sine_gen
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins sine_gen/s_axi_ctrl]
+
+# I2S-Sender (Verilog) im Audio-Takt
+create_bd_cell -type module -reference i2s_tx i2s_tx
+connect_bd_net $aclk [get_bd_pins i2s_tx/aclk]
+connect_bd_net [get_bd_pins audio_rst/peripheral_aresetn] [get_bd_pins i2s_tx/aresetn]
+
+# Samples vom 100-MHz- in den Audio-Takt
+create_bd_cell -type ip -vlnv [latest_ip axis_clock_converter] axis_cdc
+connect_bd_net $fclk [get_bd_pins axis_cdc/s_axis_aclk]
+connect_bd_net [get_bd_pins $rst100/peripheral_aresetn] [get_bd_pins axis_cdc/s_axis_aresetn]
+connect_bd_net $aclk [get_bd_pins axis_cdc/m_axis_aclk]
+connect_bd_net [get_bd_pins audio_rst/peripheral_aresetn] [get_bd_pins axis_cdc/m_axis_aresetn]
+connect_bd_intf_net [get_bd_intf_pins sine_gen/m_axis] [get_bd_intf_pins axis_cdc/S_AXIS]
+connect_bd_intf_net [get_bd_intf_pins axis_cdc/M_AXIS] [get_bd_intf_pins i2s_tx/s_axis]
+
+# Codec-Pins
+foreach {port pin} {ac_mclk i2s_mclk ac_bclk i2s_bclk ac_lrclk i2s_lrclk ac_sdata i2s_sdata} {
+    create_bd_port -dir O $port
+    connect_bd_net [get_bd_pins i2s_tx/$pin] [get_bd_ports $port]
+}
 
 assign_bd_address
 validate_bd_design

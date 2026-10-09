@@ -1,7 +1,7 @@
 # ZedBoard – Boot-Konfiguration from scratch (Vivado + PetaLinux, SD-Boot)
 
 Getestet mit Vivado 2025.2 und PetaLinux 2025.2 auf Linux Mint 22.3 (Ubuntu-24.04-Basis):
-Board bootet von SD bis zum Login, Ethernet funktioniert.
+Board bootet von SD bis zum Login, Ethernet funktioniert, Sinuston auf Line Out ist hörbar.
 
 ## Boot-Kette
 
@@ -17,8 +17,12 @@ BootROM ──► FSBL ──► Bitstream (PL) ──► U-Boot ──► boot.
 
 | Datei               | Zweck                                                        |
 |---------------------|--------------------------------------------------------------|
-| `create_hw.tcl`     | Vivado-Projekt: PS7 mit ZedBoard-Preset + AXI-GPIO (LEDs), Bitstream, `system.xsa` |
+| `build_hls.tcl`     | Vitis HLS: Sinus-Generator `hls/sine_gen.cpp` → C-Simulation, Synthese, Vivado-IP |
+| `create_hw.tcl`     | Vivado-Projekt: PS7 mit ZedBoard-Preset, AXI-GPIO (LEDs), Sinuston-Kette, Bitstream, `system.xsa` |
+| `rtl/i2s_tx.v`      | I2S-Sender (Verilog) für den Audio-Codec; Testbench in `sim/` |
+| `constraints/audio.xdc` | Pins des Audio-Codecs ADAU1761 |
 | `build_petalinux.sh`| PetaLinux-Projekt aus XSA, ext4-Rootfs auf SD, Build, `BOOT.BIN`, `.wic` |
+| `target/`           | Skripte fürs Board (`codec_init.sh`, `set_freq.sh`) und ihr Rezept; landen in `/usr/bin` |
 | `system-user.dtsi`  | Device-Tree-Ergänzungen (Konsole, Ethernet-PHY, SD)          |
 | `prepare_sd.sh`     | SD-Karte manuell partitionieren und befüllen (bisher nicht getestet) |
 
@@ -61,7 +65,9 @@ PetaLinux-Installation (nicht als root; `--platform "arm"` = nur Zynq-7000):
 Installationspfade auf diesem Rechner: Vivado `~/tools/amd/2025.2/Vivado`, PetaLinux `~/tools/amd/petalinux`.
 
 ```bash
-# 1. Hardware (ca. 3 min)
+# 1. HLS-IP und Hardware (je ca. 3 min)
+source ~/tools/amd/2025.2/Vitis/settings64.sh
+vitis-run --mode hls --tcl build_hls.tcl            # -> hls/proj/solution1/impl/ip
 source ~/tools/amd/2025.2/Vivado/settings64.sh
 vivado -mode batch -source create_hw.tcl            # -> system.xsa
 
@@ -110,6 +116,8 @@ Zum Vergleich mit dem Schaltplan: ZedBoard Hardware User's Guide, Abschnitt „C
 | Peripherie        | Anbindung |
 |-------------------|-----------|
 | LEDs LD0–LD7      | AXI-GPIO `leds` auf `0x41200000`, 8 Bit, nur Ausgang |
+| Sinus-Generator   | HLS-Core `sine_gen` auf `0x40000000`, Register `phase_inc` bei Offset `0x10` |
+| Audio-Codec ADAU1761 | I2S aus `i2s_tx`, I2C über PS-I2C0 (EMIO), Adresse `0x38` |
 | DIP-Schalter, Taster | nicht angeschlossen (Board-Interfaces `sws_8bits`, `btns_5bits` wären verfügbar) |
 
 LED-Test über sysfs (als root; `gpioset`/libgpiod ist nicht im Rootfs):
@@ -122,12 +130,42 @@ echo out > /sys/class/gpio/gpio$BASE/direction
 echo 1 > /sys/class/gpio/gpio$BASE/value             # LD0 an; LD1..LD7 = BASE+1..BASE+7
 ```
 
+## Sinuston auf Line Out
+
+```
+Linux ──AXI-Lite (phase_inc)──► sine_gen (HLS) ──AXI-Stream, 24 Bit──► Clock Converter ──► i2s_tx ──► ADAU1761 ──► Line Out
+PS-I2C0 (EMIO) ────────────────────────────────────────────────────────────── Codec-Register ──┘
+Clocking Wizard: 100 MHz ──► 12,288 MHz (MCLK = 256 × 48 kHz)
+```
+
+- `sine_gen` ist ein DDS: 32-Bit-Phasenakkumulator, Viertelwellen-Tabelle mit 1024 Einträgen, Pegel −6 dBFS.
+  `f = phase_inc × 48000 / 2^32` (Auflösung ca. 0,011 Hz). Nach dem Reset ist `phase_inc = 0` = Stille.
+- Der Core läuft frei mit 100 MHz; `i2s_tx` nimmt pro 48-kHz-Frame genau ein Sample ab und gibt es
+  links und rechts aus. Der FPGA ist I2S-Master, der Codec Slave ohne PLL.
+- Der Codec muss nach jedem Boot einmal per I2C eingerichtet werden.
+
+Auf dem Board (als root):
+
+```bash
+codec_init.sh        # Codec einrichten: Line Out 0 dB, Kopfhörer −20 dB
+set_freq.sh 440      # 440 Hz
+set_freq.sh          # aktuelle Frequenz anzeigen
+set_freq.sh 0        # Stille
+```
+
+Tests ohne Board:
+
+```bash
+vitis-run --mode hls --tcl build_hls.tcl    # enthält die C-Simulation von sine_gen ("TEST OK")
+bash sim/run_sim.sh                         # i2s_tx im Vivado-Simulator ("TEST OK")
+```
+
 ## Typische Anpassungen
 
 - **Kernel-Optionen:** `petalinux-config -c kernel`
 - **U-Boot:** `petalinux-config -c u-boot`
 - **Pakete im Rootfs:** `petalinux-config -c rootfs`
-- **Neue PL-Hardware:** Vivado ändern → XSA neu exportieren → `petalinux-config --get-hw-description=<xsa> --silentconfig` → `petalinux-build` → `petalinux-package boot ...`
+- **Neue PL-Hardware:** Vivado ändern → XSA neu exportieren → `build_petalinux.sh` erneut aufrufen (importiert die XSA in das bestehende Projekt, baut und packt neu)
 
 ## Fehlersuche
 
@@ -142,6 +180,8 @@ echo 1 > /sys/class/gpio/gpio$BASE/value             # LD0 an; LD1..LD7 = BASE+1
 | U-Boot startet, Kernel nicht              | `boot.scr` bzw. `image.ub`/`uImage` fehlen; in U-Boot `fatls mmc 0:1`, `boot` |
 | `VFS: Unable to mount root fs`            | Rootfs nicht auf `mmcblk0p2`, oder Image noch als initramfs konfiguriert |
 | Ethernet ohne Link                        | PHY-Knoten in `system-user.dtsi`, `phy-mode` prüfen |
+| `xelab`: `cannot find crt1.o`             | Vivado-Simulator findet die System-Bibliotheken nicht: `export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu` (steht in `sim/run_sim.sh`) |
+| `codec_init.sh`: „Codec antwortet nicht"  | Bitstream geladen (ohne MCLK reagiert der Codec nicht)? `i2cdetect -y <bus>` muss `38` zeigen |
 
 ## Hinweis zu PetaLinux-Versionen
 

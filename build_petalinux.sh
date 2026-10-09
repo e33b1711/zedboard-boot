@@ -35,11 +35,12 @@ petalinux-config --get-hw-description="$XSA" --silentconfig
 
 # --- Kconfig-Werte setzen ---------------------------------------------------
 CFG=project-spec/configs/config
-setcfg() {   # setcfg KEY VALUE   (VALUE "n" => deaktivieren)
-    local key="$1" val="$2"
-    sed -i -E "/^(# )?${key}[= ].*/d" "$CFG"
-    if [[ "$val" == "n" ]]; then echo "# ${key} is not set" >> "$CFG"
-    else echo "${key}=${val}" >> "$CFG"; fi
+ROOTFS_CFG=project-spec/configs/rootfs_config
+setcfg() {   # setcfg KEY VALUE [DATEI]   (VALUE "n" => deaktivieren)
+    local key="$1" val="$2" file="${3:-$CFG}"
+    sed -i -E "/^(# )?${key}[= ].*/d" "$file"
+    if [[ "$val" == "n" ]]; then echo "# ${key} is not set" >> "$file"
+    else echo "${key}=${val}" >> "$file"; fi
 }
 
 # Board-Name -> ZedBoard-spezifische DT-Teile (PHY, LEDs usw.)
@@ -57,6 +58,16 @@ DTSI_DST=project-spec/meta-user/recipes-bsp/device-tree/files/system-user.dtsi
 if [[ -f "$SCRIPT_DIR/system-user.dtsi" ]]; then
     cp "$SCRIPT_DIR/system-user.dtsi" "$DTSI_DST"
 fi
+
+# --- Sinuston: Skripte (codec_init.sh, set_freq.sh) und i2c-tools ins Rootfs --
+APP_DIR=project-spec/meta-user/recipes-apps/zed-tone
+mkdir -p "$APP_DIR/files"
+cp "$SCRIPT_DIR/target/zed-tone.bb" "$APP_DIR/"
+cp "$SCRIPT_DIR/target/codec_init.sh" "$SCRIPT_DIR/target/set_freq.sh" "$APP_DIR/files/"
+USER_ROOTFS=project-spec/meta-user/conf/user-rootfsconfig
+grep -qx 'CONFIG_zed-tone' "$USER_ROOTFS" || echo 'CONFIG_zed-tone' >> "$USER_ROOTFS"
+setcfg CONFIG_zed-tone y "$ROOTFS_CFG"
+setcfg CONFIG_i2c-tools y "$ROOTFS_CFG"
 
 petalinux-config --silentconfig
 

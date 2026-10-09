@@ -4,7 +4,7 @@
 #
 #  Aufruf: hdmi_init.sh            (als root, nach jedem Boot einmal)
 #
-#  Eingang: 16 Bit YCbCr 4:2:2, getrennte Syncs, 1280x720 bei 60 Hz
+#  Eingang: 16 Bit YCbCr 4:2:2, getrennte Syncs, 1920x1080 bei 60 Hz
 #  Ausgang: HDMI, RGB 4:4:4 (Farbwandlung im ADV7511)
 # =============================================================================
 set -e

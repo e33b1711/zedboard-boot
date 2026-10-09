@@ -16,6 +16,12 @@ static void rgb_to_ycbcr(rgb_t p, ap_uint<8> &y, ap_uint<8> &cb, ap_uint<8> &cr)
     cr = crs + 128;
 }
 
+// Dreieckschwingung: 9 Bit Phase -> 0..255..0, ohne Sprung beim Ueberlauf
+static ap_uint<8> triangle(ap_uint<9> phase) {
+    ap_uint<8> v = phase(7, 0);
+    return phase[8] ? ap_uint<8>(~v) : v;
+}
+
 void pattern_gen(ap_uint<8> pattern, ap_uint<24> color, ap_uint<2> format,
                  hls::stream<video_t> &m_axis_video) {
 #pragma HLS INTERFACE s_axilite port=pattern bundle=ctrl
@@ -27,7 +33,7 @@ void pattern_gen(ap_uint<8> pattern, ap_uint<24> color, ap_uint<2> format,
 
     // Ein Aufruf = ein Pixel
     static ap_uint<11> x = 0;
-    static ap_uint<10> y = 0;
+    static ap_uint<11> y = 0;
 
     // Register werden nur am Bildanfang uebernommen -> kein Wechsel mitten im Bild
     static ap_uint<8>  pattern_r = 0;
@@ -36,8 +42,10 @@ void pattern_gen(ap_uint<8> pattern, ap_uint<24> color, ap_uint<2> format,
 
     // Bewegtes Quadrat: Position und Richtung, ein Schritt pro Bild
     static ap_uint<11> box_x = 100;
-    static ap_uint<10> box_y = 100;
+    static ap_uint<11> box_y = 100;
     static bool box_right = true, box_down = true;
+
+    static ap_uint<9> frame = 0;           // Bildzaehler fuer den Farbverlauf
 
     static ap_uint<8> cr_hold = 128;      // Cr des geraden Pixels fuer das ungerade
 
@@ -54,15 +62,15 @@ void pattern_gen(ap_uint<8> pattern, ap_uint<24> color, ap_uint<2> format,
     rgb_t p = {0, 0, 0};
     switch (pattern_r) {
     case PATTERN_BARS: {
-        // Balken je 160 Pixel: weiss, gelb, cyan, gruen, magenta, rot, blau, schwarz
-        ap_uint<3> bar = ~ap_uint<3>(x / 160);
+        // 8 gleich breite Balken: weiss, gelb, cyan, gruen, magenta, rot, blau, schwarz
+        ap_uint<3> bar = ~ap_uint<3>(x / (FRAME_WIDTH / 8));
         p.g = bar[2] ? 255 : 0;
         p.r = bar[1] ? 255 : 0;
         p.b = bar[0] ? 255 : 0;
         break;
     }
     case PATTERN_RAMP: {
-        ap_uint<8> v = (x * 51) >> 8;     // 0..1279 -> 0..254
+        ap_uint<8> v = (x * 34) >> 8;     // 0..1919 -> 0..254
         p.r = v; p.g = v; p.b = v;
         break;
     }
@@ -79,6 +87,15 @@ void pattern_gen(ap_uint<8> pattern, ap_uint<24> color, ap_uint<2> format,
                        y >= box_y && y < box_y + BOX_SIZE);
         if (inside) { p.r = 255; p.g = 255; p.b = 255; }
         else        { p.r = 0;   p.g = 0;   p.b = 96;  }
+        break;
+    }
+    case PATTERN_GRADIENT: {
+        // Rot laeuft horizontal, Gruen vertikal, Blau diagonal; jede Farbe wandert
+        // mit eigener Geschwindigkeit (ein Durchlauf des Bildzaehlers = 512 Bilder)
+        ap_uint<9> t = frame;
+        p.r = triangle(ap_uint<9>(x >> 2) + t);
+        p.g = triangle(ap_uint<9>(y >> 2) + (t << 1));
+        p.b = triangle(ap_uint<9>((x + y) >> 3) - t);
         break;
     }
     default:                               // PATTERN_BLACK und unbekannte Werte
@@ -110,6 +127,7 @@ void pattern_gen(ap_uint<8> pattern, ap_uint<24> color, ap_uint<2> format,
         x = 0;
         if (y == FRAME_HEIGHT - 1) {
             y = 0;
+            frame++;
             // Quadrat fuer das naechste Bild verschieben, an den Raendern umkehren
             if (box_right) { if (box_x >= FRAME_WIDTH - BOX_SIZE - 4) box_right = false; else box_x += 4; }
             else           { if (box_x < 4)                          box_right = true;  else box_x -= 4; }

@@ -9,7 +9,7 @@
 #  Inhalt:  Zynq PS7 mit ZedBoard-Preset (DDR, MIO, UART, SD, ETH, USB)
 #           + AXI-GPIO an den 8 User-LEDs
 #           + Sinuston auf Line Out: HLS-Sinus-Generator -> I2S -> ADAU1761
-#           + HDMI-Testbild 720p60: HLS-Testbild-Generator -> Video Out -> ADV7511
+#           + HDMI-Testbild 1080p60: HLS-Testbild-Generator -> Video Out -> ADV7511
 # =============================================================================
 
 set proj_name zedboard_hw
@@ -143,7 +143,7 @@ foreach {port pin} {ac_mclk i2s_mclk ac_bclk i2s_bclk ac_lrclk i2s_lrclk ac_sdat
 
 # --- HDMI: Testbild-Generator (HLS) -> Video Out -> ADV7511 -------------------
 #   Bildauswahl: AXI-Lite-Register des HLS-Cores (pattern 0x10, color 0x18, format 0x20)
-#   1280x720 bei 60 Hz, Pixeltakt 74,25 MHz, 16 Bit YCbCr 4:2:2
+#   1920x1080 bei 60 Hz, Pixeltakt 148,5 MHz, 16 Bit YCbCr 4:2:2
 #   Kein Linux-Treiber: der ADV7511 wird per Skript ueber I2C eingerichtet
 
 # ADV7511-I2C: PS-I2C1 ueber EMIO auf PL-Pins
@@ -151,12 +151,12 @@ set_property -dict [list CONFIG.PCW_I2C1_PERIPHERAL_ENABLE {1} CONFIG.PCW_I2C1_I
 create_bd_intf_port -mode Master -vlnv xilinx.com:interface:iic_rtl:1.0 hd_iic
 connect_bd_intf_net [get_bd_intf_pins ps7/IIC_1] [get_bd_intf_ports hd_iic]
 
-# Pixeltakt 74,25 MHz und zugehoeriger Reset
+# Pixeltakt 148,5 MHz und zugehoeriger Reset
 create_bd_cell -type ip -vlnv [latest_ip clk_wiz] video_clk
 set_property -dict [list \
     CONFIG.PRIM_SOURCE {Global_buffer} \
     CONFIG.PRIM_IN_FREQ {100.000} \
-    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {74.25} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {148.5} \
     CONFIG.USE_RESET {false} \
     CONFIG.USE_LOCKED {true}] [get_bd_cells video_clk]
 connect_bd_net $fclk [get_bd_pins video_clk/clk_in1]
@@ -180,10 +180,10 @@ if {[get_bd_nets -of_objects [get_bd_pins pattern_gen/ap_clk]] ne [get_bd_nets -
     error "pattern_gen laeuft nicht im Pixeltakt"
 }
 
-# Timing-Generator 720p60 (feste Einstellung, ohne AXI-Lite)
+# Timing-Generator 1080p60 (feste Einstellung, ohne AXI-Lite)
 create_bd_cell -type ip -vlnv [latest_ip v_tc] video_tc
 set_property -dict [list \
-    CONFIG.VIDEO_MODE {720p} \
+    CONFIG.VIDEO_MODE {1080p} \
     CONFIG.HAS_AXI4_LITE {false} \
     CONFIG.enable_detection {false}] [get_bd_cells video_tc]
 connect_bd_net $pclk  [get_bd_pins video_tc/clk]

@@ -2,7 +2,7 @@
 
 Getestet mit Vivado 2025.2 und PetaLinux 2025.2 auf Linux Mint 22.3 (Ubuntu-24.04-Basis):
 Board bootet von SD bis zum Login, Ethernet funktioniert, Sinuston auf Line Out ist hörbar,
-HDMI-Testbilder (alle sechs, Farben korrekt mit `format 0`) auf dem Monitor geprüft.
+HDMI-Testbilder in 1080p60 auf dem Monitor geprüft (Farben korrekt mit `format 0`, Farbverlauf ohne Pixelfehler).
 
 ## Boot-Kette
 
@@ -170,10 +170,10 @@ bash sim/run_sim.sh                         # i2s_tx im Vivado-Simulator ("TEST 
 Linux ──AXI-Lite (pattern, color)──► pattern_gen (HLS) ──AXI-Stream-Video──► AXI4-Stream to Video Out ──► ADV7511 ──► HDMI
                                                           Video Timing Controller ──┘ (HSYNC, VSYNC, DE)
 PS-I2C1 (EMIO) ──────────────────────────────────────────────────────── ADV7511-Register ──┘
-Clocking Wizard: 100 MHz ──► 74,25 MHz Pixeltakt
+Clocking Wizard: 100 MHz ──► 148,5 MHz Pixeltakt
 ```
 
-- Feste Auflösung 1280×720 bei 60 Hz. Für Linux gibt es kein Display: kein Treiber, kein Framebuffer,
+- Feste Auflösung 1920×1080 bei 60 Hz. Für Linux gibt es kein Display: kein Treiber, kein Framebuffer,
   kein Device-Tree-Knoten für den ADV7511. Gesteuert wird nur über die beiden Skripte.
 - `pattern_gen` erzeugt pro Takt ein Pixel, rechnet das Testbild in RGB und gibt es als
   YCbCr 4:2:2 (BT.709, begrenzter Wertebereich) aus, weil auf dem ZedBoard nur 16 Datenleitungen
@@ -190,6 +190,7 @@ Clocking Wizard: 100 MHz ──► 74,25 MHz Pixeltakt
 | 3 | Schachbrett, 64 Pixel |
 | 4 | Vollfläche in der Farbe aus `color` (`0xRRGGBB`) |
 | 5 | weißes Quadrat, das über dunkelblauen Hintergrund wandert |
+| 6 | Farbverlauf (rot horizontal, grün vertikal, blau diagonal), der mit der Zeit wandert |
 
 Auf dem Board (als root):
 
@@ -199,6 +200,12 @@ set_pattern.sh 1           # Farbbalken
 set_pattern.sh 4 ff8000    # Vollfläche orange
 set_pattern.sh             # aktuelle Einstellung anzeigen
 ```
+
+Timing: Der Pixeltakt von 148,5 MHz ist für diesen FPGA (Speed Grade -1) knapp, der Build schließt
+mit ca. 0,6 ns Reserve. Die HDMI-Pins haben wie im ADI-Referenzdesign keine Output-Delay-Constraints;
+Ausgangsregister in den IO-Zellen und der per ODDR ausgegebene Takt halten die Laufzeiten gleich.
+Für 720p: `FRAME_WIDTH`/`FRAME_HEIGHT` in `hls/pattern_gen.h`, Taktperiode in `build_hls.tcl`,
+Pixeltakt (74,25 MHz) und `VIDEO_MODE` in `create_hw.tcl` ändern.
 
 Zur Fehlersuche an der Datenstrecke lässt sich die Byte-Reihenfolge ohne Neubau ändern:
 `set_pattern.sh format N` mit Bit 0 = Cb/Cr tauschen, Bit 1 = Y und Cb/Cr tauschen.
@@ -227,7 +234,7 @@ Die C-Simulation schreibt alle Testbilder als `pattern<n>.ppm` nach
 | `VFS: Unable to mount root fs`            | Rootfs nicht auf `mmcblk0p2`, oder Image noch als initramfs konfiguriert |
 | Ethernet ohne Link                        | PHY-Knoten in `system-user.dtsi`, `phy-mode` prüfen |
 | `xelab`: `cannot find crt1.o`             | Vivado-Simulator findet die System-Bibliotheken nicht: `export LIBRARY_PATH=/usr/lib/x86_64-linux-gnu` (steht in `sim/run_sim.sh`) |
-| HDMI: kein Bild                           | `hdmi_init.sh` gelaufen? Meldet es „Monitor erkannt"? Monitor muss 720p60 können |
+| HDMI: kein Bild                           | `hdmi_init.sh` gelaufen? Meldet es „Monitor erkannt"? Monitor muss 1080p60 können |
 | HDMI: falsche Farben (grün/rosa, rot/blau vertauscht) | Byte-Reihenfolge: `set_pattern.sh format 1`, `2` oder `3` probieren, mit Farbbalken prüfen |
 | HDMI: flimmernde Einzelpixel              | Takt/Daten-Lage: Taktverzögerung im ADV7511 (Register `0xBA`) in `hdmi_init.sh` ändern |
 | `codec_init.sh`: „Codec antwortet nicht"  | Bitstream geladen (ohne MCLK reagiert der Codec nicht)? `i2cdetect -y <bus>` muss `38` zeigen |

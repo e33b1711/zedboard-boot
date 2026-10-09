@@ -11,7 +11,7 @@ cd [file dirname [file normalize [info script]]]/hls
 # Name, Taktperiode in ns, Beschreibung
 set cores {
     sine_gen    10.0  "Sinus-Generator (DDS), Frequenz ueber AXI-Lite"
-    pattern_gen 13.0  "Testbild-Generator 1280x720 YCbCr 4:2:2, Auswahl ueber AXI-Lite"
+    pattern_gen 6.7   "Testbild-Generator 1920x1080 YCbCr 4:2:2, Auswahl ueber AXI-Lite"
 }
 
 foreach {core period description} $cores {

@@ -8,12 +8,12 @@
 #          set_pattern.sh format 1     Fehlersuche: Bit 0 = Cb/Cr tauschen, Bit 1 = Y/C tauschen
 #
 #  Testbilder: 0 schwarz, 1 Farbbalken, 2 Graukeil, 3 Schachbrett,
-#              4 Vollflaeche, 5 bewegtes Quadrat
+#              4 Vollflaeche, 5 bewegtes Quadrat, 6 wandernder Farbverlauf
 #  Register:   pattern 0x10, color 0x18, format 0x20
 # =============================================================================
 set -e
 
-NAMES="schwarz Farbbalken Graukeil Schachbrett Vollflaeche Quadrat"
+NAMES="schwarz Farbbalken Graukeil Schachbrett Vollflaeche Quadrat Farbverlauf"
 
 # Basisadresse aus dem Device Tree (Knoten pattern_gen@<adresse>), sonst Vorgabe
 NODE=$(find /proc/device-tree -maxdepth 2 -name 'pattern_gen@*' 2>/dev/null | head -n 1)
@@ -37,7 +37,7 @@ if [ "$1" = "format" ]; then
     exit 0
 fi
 
-case "$1" in [0-5]) ;; *) usage ;; esac
+case "$1" in [0-6]) ;; *) usage ;; esac
 if [ -n "$2" ]; then
     echo "$2" | grep -Eq '^[0-9a-fA-F]{6}$' || usage
     devmem "$(reg 0x18)" 32 "0x$2"

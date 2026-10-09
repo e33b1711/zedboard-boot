@@ -1,4 +1,4 @@
-// Testbild-Generator fuer Vitis HLS: 1280x720, YCbCr 4:2:2 (16 Bit) als AXI4-Stream-Video
+// Testbild-Generator fuer Vitis HLS: 1920x1080, YCbCr 4:2:2 (16 Bit) als AXI4-Stream-Video
 //   tdata[7:0] = Y, tdata[15:8] = Cb (gerade Pixel) / Cr (ungerade Pixel)
 //   tuser = Start of Frame, tlast = End of Line
 #ifndef PATTERN_GEN_H
@@ -8,8 +8,8 @@
 #include <ap_axi_sdata.h>
 #include <hls_stream.h>
 
-#define FRAME_WIDTH  1280
-#define FRAME_HEIGHT 720
+#define FRAME_WIDTH  1920
+#define FRAME_HEIGHT 1080
 
 // Werte des Registers "pattern"
 enum {
@@ -19,7 +19,8 @@ enum {
     PATTERN_CHECKER  = 3,   // Schachbrett, 64 Pixel
     PATTERN_SOLID    = 4,   // Vollflaeche in der Farbe aus Register "color"
     PATTERN_BOX      = 5,   // bewegtes Quadrat
-    PATTERN_COUNT    = 6
+    PATTERN_GRADIENT = 6,   // Farbverlauf, der sich mit der Zeit verschiebt
+    PATTERN_COUNT    = 7
 };
 
 // Bits des Registers "format" (nur zur Fehlersuche an der HDMI-Strecke)

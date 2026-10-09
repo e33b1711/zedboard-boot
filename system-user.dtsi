@@ -1,0 +1,33 @@
+/include/ "system-conf.dtsi"
+/*
+ * ZedBoard – benutzerspezifische Device-Tree-Ergaenzungen
+ * Ziel: project-spec/meta-user/recipes-bsp/device-tree/files/system-user.dtsi
+ */
+/ {
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+};
+
+/* Ethernet: Marvell 88E1518 PHY auf MDIO-Adresse 0 */
+&gem0 {
+	phy-handle = <&ethernet_phy>;
+	phy-mode = "rgmii-id";
+	ethernet_phy: ethernet-phy@0 {
+		reg = <0>;
+		device_type = "ethernet-phy";
+	};
+};
+
+/* SD-Karte: kein Card-Detect-Problem, Karte ist beim Boot vorhanden */
+&sdhci0 {
+	disable-wp;
+};
+
+/*
+ * USB-OTG (J13) als Host – nur aktivieren, wenn benoetigt:
+ *
+ * &usb0 {
+ *	dr_mode = "host";
+ * };
+ */

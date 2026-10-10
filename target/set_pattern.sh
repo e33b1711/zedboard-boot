@@ -18,7 +18,7 @@ set -e
 NAMES="schwarz Farbbalken Graukeil Schachbrett Vollflaeche Quadrat Farbverlauf Framebuffer"
 
 # Basisadresse aus dem Device Tree (Knoten pattern_gen@<adresse>), sonst Vorgabe
-NODE=$(find /proc/device-tree -maxdepth 2 -name 'pattern_gen@*' 2>/dev/null | head -n 1)
+NODE=$(find /proc/device-tree/ -maxdepth 2 -name 'pattern_gen@*' 2>/dev/null | head -n 1)
 if [ -n "$NODE" ]; then BASE=0x${NODE##*@}; else BASE=0x40010000; fi
 reg() { printf '0x%08X' $((BASE + $1)); }
 

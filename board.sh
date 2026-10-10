@@ -4,7 +4,7 @@
 #
 #  Aufruf: ./board.sh deploy        Boot-Dateien und Werkzeuge uebertragen, bei
 #                                   geaenderten Boot-Dateien neu starten
-#          ./board.sh tools         nur die Werkzeuge nach /usr/bin (ohne Neustart)
+#          ./board.sh tools         nur die Werkzeuge mit ihren Bibliotheken (ohne Neustart)
 #          ./board.sh run BEFEHL    Befehl auf dem Board ausfuehren
 #          ./board.sh find          Adresse des Boards ausgeben
 #
@@ -52,15 +52,18 @@ find_board() {
 
 on_board() { ssh "${SSH_OPTS[@]}" "root@$HOST" "$@"; }
 
-# Werkzeuge aus dem gebauten Rootfs nach /usr/bin
+# Werkzeuge aus dem gebauten Rootfs nach /usr/bin, dazu die HackRF-Werkzeuge mit ihren
+# Bibliotheken nach /usr/lib und /lib (fehlen in Images von vor dem HackRF-Stand)
 deploy_tools() {
-    local names=(fb_test) f
+    local names=(fb_test iq_rx 'hackrf_*') f
     for f in "$DIR"/target/*.sh; do names+=("$(basename "$f")"); done
+    local libs=('usr/lib/libhackrf.so*' 'usr/lib/libfftw3f.so*' 'lib/libusb-1.0.so*' 'lib/libudev.so*')
     local tmp; tmp="$(mktemp -d)"
-    tar -xzf "$IMG/rootfs.tar.gz" -C "$tmp" "${names[@]/#/./usr/bin/}"
-    tar -C "$tmp" -cf - ./usr/bin | on_board 'tar -C / -xf -'
+    tar -xzf "$IMG/rootfs.tar.gz" -C "$tmp" --wildcards "${names[@]/#/./usr/bin/}" "${libs[@]/#/./}"
+    tar -C "$tmp" --owner=0 --group=0 -cf - ./usr ./lib | on_board 'tar -C / -xf -'
+    echo "Werkzeuge uebertragen: $(ls "$tmp/usr/bin" | tr '\n' ' ')"
+    echo "Bibliotheken uebertragen: $(ls "$tmp/usr/lib" "$tmp/lib" | grep '\.so' | tr '\n' ' ')"
     rm -rf "$tmp"
-    echo "Werkzeuge uebertragen: ${names[*]}"
 }
 
 # Boot-Dateien auf die FAT-Partition; uebertraegt nur, was sich geaendert hat.

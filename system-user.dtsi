@@ -30,6 +30,15 @@
 			reg = <0x1e800000 0x400000>;
 			no-map;
 		};
+		/*
+		 * Ringpuffer fuer I/Q-Daten vom HackRF auf dem Weg in die PL (16 MiB, etwa
+		 * 0,5 s bei 16 Msps): iq_rx schreibt ueber /dev/mem, der Core iq_reader
+		 * liest ueber den HP1-Port.
+		 */
+		iqring: iqring@1f000000 {
+			reg = <0x1f000000 0x1000000>;
+			no-map;
+		};
 	};
 };
 
@@ -49,9 +58,6 @@
 };
 
 /*
- * USB-OTG (J13) als Host – nur aktivieren, wenn benoetigt:
- *
- * &usb0 {
- *	dr_mode = "host";
- * };
+ * USB-OTG (J13): laeuft bereits als Host (dr_mode = "host" kommt aus den
+ * ZedBoard-Teilen von PetaLinux), hier ist dafuer nichts einzutragen.
  */

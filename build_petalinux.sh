@@ -59,7 +59,7 @@ if [[ -f "$SCRIPT_DIR/system-user.dtsi" ]]; then
     cp "$SCRIPT_DIR/system-user.dtsi" "$DTSI_DST"
 fi
 
-# --- Werkzeuge fuers Board (Sinuston, HDMI-Testbild, Framebuffer) und i2c-tools ins Rootfs --
+# --- Werkzeuge fuers Board (Sinuston, HDMI-Testbild, Framebuffer, HackRF) und i2c-tools ins Rootfs --
 APP_DIR=project-spec/meta-user/recipes-apps/zed-tools
 USER_ROOTFS=project-spec/meta-user/conf/user-rootfsconfig
 # Vorgaenger-Rezept aus aelteren Projektstaenden entfernen
@@ -70,6 +70,9 @@ sed -i -E '/^(# )?CONFIG_zed-tone[= ]/d' "$ROOTFS_CFG"
 mkdir -p "$APP_DIR/files"
 cp "$SCRIPT_DIR/target/zed-tools.bb" "$APP_DIR/"
 cp "$SCRIPT_DIR"/target/*.sh "$SCRIPT_DIR"/target/*.c "$APP_DIR/files/"
+# libhackrf und die HackRF-Werkzeuge; kommen als Abhaengigkeit von zed-tools ins Rootfs
+mkdir -p project-spec/meta-user/recipes-apps/hackrf
+cp "$SCRIPT_DIR/target/hackrf.bb" project-spec/meta-user/recipes-apps/hackrf/
 
 # --- SSH fuer board.sh: fester Host-Schluessel und Schluessel des PCs fuer root --
 # Der Host-Schluessel liegt in ./keys (nicht im Git) und bleibt ueber alle Builds gleich,

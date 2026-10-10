@@ -11,6 +11,9 @@
 #           + Sinuston auf Line Out: HLS-Sinus-Generator -> I2S -> ADAU1761
 #           + HDMI-Testbild 1080p60: HLS-Testbild-Generator -> Video Out -> ADV7511
 #           + drei Framebuffer im DDR, vom Testbild-Generator ueber den HP0-Port gelesen
+#           + I/Q-Oszilloskop als Einblendung im Videostrom (Bildspeicher im Block-RAM)
+#           + I/Q-Ringpuffer im DDR, vom Core iq_reader ueber den HP1-Port gelesen
+#           + Spektrum der I/Q-Daten (FFT, Mittelung, Max-Hold), als Kurve im Oszilloskop
 # =============================================================================
 
 set proj_name zedboard_hw
@@ -53,7 +56,7 @@ set_property board_part $bp [current_project]
 
 # --- Eigene Quellen: HLS-IP, Verilog, Constraints ---------------------------
 set hls_ips {}
-foreach core {sine_gen pattern_gen} {
+foreach core {sine_gen pattern_gen iq_reader iq_spectrum} {
     set hls_ip [file normalize ./hls/proj_$core/solution1/impl/ip]
     if {![file exists $hls_ip/component.xml]} {
         error "HLS-IP fehlt ($hls_ip). Zuerst: vitis-run --mode hls --tcl build_hls.tcl"
@@ -62,7 +65,8 @@ foreach core {sine_gen pattern_gen} {
 }
 set_property ip_repo_paths $hls_ips [current_project]
 update_ip_catalog
-add_files -norecurse [list [file normalize ./rtl/i2s_tx.v] [file normalize ./rtl/clk_fwd.v]]
+add_files -norecurse [list [file normalize ./rtl/i2s_tx.v] [file normalize ./rtl/clk_fwd.v] \
+    [file normalize ./rtl/iq_scope.v] [file normalize ./rtl/iq_palette.v] [file normalize ./rtl/spec_trace.v]]
 add_files -fileset constrs_1 -norecurse [list [file normalize ./constraints/audio.xdc] [file normalize ./constraints/hdmi.xdc]]
 update_compile_order -fileset sources_1
 
@@ -142,7 +146,7 @@ foreach {port pin} {ac_mclk i2s_mclk ac_bclk i2s_bclk ac_lrclk i2s_lrclk ac_sdat
     connect_bd_net [get_bd_pins i2s_tx/$pin] [get_bd_ports $port]
 }
 
-# --- HDMI: Testbild-Generator (HLS) -> Video Out -> ADV7511 -------------------
+# --- HDMI: Testbild-Generator (HLS) -> I/Q-Oszilloskop -> Video Out -> ADV7511 ---
 #   Bildauswahl: AXI-Lite-Register des HLS-Cores (pattern 0x10, color 0x18, format 0x20)
 #   Framebuffer: der Core liest ueber seinen AXI-Master aus dem DDR des PS (HP0-Port)
 #   1920x1080 bei 60 Hz, Pixeltakt 148,5 MHz, 16 Bit YCbCr 4:2:2
@@ -200,6 +204,32 @@ connect_bd_net $prstn [get_bd_pins fb_axi/aresetn]
 connect_bd_intf_net [get_bd_intf_pins pattern_gen/m_axi_fb] [get_bd_intf_pins fb_axi/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins fb_axi/M00_AXI] [get_bd_intf_pins ps7/S_AXI_HP0]
 
+# I/Q-Daten: Linux schreibt sie in einen Ringpuffer im DDR, der Core iq_reader (HLS-IP)
+# liest sie ueber den HP1-Port und gibt sie als Strom an das Oszilloskop.
+#   Register: enable 0x10, ring_addr 0x18, ring_bytes 0x20, wr_ptr 0x28,
+#             rd_ptr 0x30, samples 0x40, seq_errors 0x50
+#   Eigener HP-Port, damit der Framebuffer-Leser am HP0 nicht warten muss.
+create_bd_cell -type ip -vlnv [latest_ip iq_reader] iq_reader
+connect_bd_net $pclk  [get_bd_pins iq_reader/ap_clk]
+connect_bd_net $prstn [get_bd_pins iq_reader/ap_rst_n]
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins iq_reader/s_axi_ctrl]
+if {[get_bd_nets -of_objects [get_bd_pins iq_reader/ap_clk]] ne [get_bd_nets -of_objects $pclk]} {
+    error "iq_reader laeuft nicht im Pixeltakt"
+}
+connect_bd_net [get_bd_pins pattern_start/dout] [get_bd_pins iq_reader/ap_start]
+
+set_property -dict [list CONFIG.PCW_USE_S_AXI_HP1 {1}] [get_bd_cells ps7]
+connect_bd_net $fclk [get_bd_pins ps7/S_AXI_HP1_ACLK]
+create_bd_cell -type ip -vlnv [latest_ip smartconnect] iq_axi
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1} CONFIG.NUM_CLKS {2}] [get_bd_cells iq_axi]
+connect_bd_net $pclk  [get_bd_pins iq_axi/aclk]
+connect_bd_net $fclk  [get_bd_pins iq_axi/aclk1]
+connect_bd_net $prstn [get_bd_pins iq_axi/aresetn]
+connect_bd_intf_net [get_bd_intf_pins iq_reader/m_axi_ring] [get_bd_intf_pins iq_axi/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins iq_axi/M00_AXI] [get_bd_intf_pins ps7/S_AXI_HP1]
+
 # Timing-Generator 1080p60 (feste Einstellung, ohne AXI-Lite)
 create_bd_cell -type ip -vlnv [latest_ip v_tc] video_tc
 set_property -dict [list \
@@ -222,7 +252,67 @@ if {[get_property LEFT [get_bd_pins video_out/vid_data]] != 15} {
 }
 connect_bd_net $pclk  [get_bd_pins video_out/aclk]
 connect_bd_net $prstn [get_bd_pins video_out/aresetn]
-connect_bd_intf_net [get_bd_intf_pins pattern_gen/m_axis_video] [get_bd_intf_pins video_out/video_in]
+
+# I/Q-Oszilloskop (Verilog) zwischen Testbild-Generator und Videoausgabe.
+#   Einstellung ueber ein AXI-GPIO mit 32 Ausgaengen (Belegung siehe rtl/iq_scope.v);
+#   das GPIO laeuft im Pixeltakt, damit das Steuerwort ohne Taktuebergang ankommt.
+#   Den I/Q-Eingang speist spec_trace: entweder die Daten von iq_reader oder die Kurve
+#   des Spektrums.
+create_bd_cell -type ip -vlnv [latest_ip axi_gpio] scope_ctrl
+set_property -dict [list CONFIG.C_GPIO_WIDTH {32} CONFIG.C_ALL_OUTPUTS {1} CONFIG.C_DOUT_DEFAULT {0x00000000}] \
+    [get_bd_cells scope_ctrl]
+connect_bd_net $pclk  [get_bd_pins scope_ctrl/s_axi_aclk]
+connect_bd_net $prstn [get_bd_pins scope_ctrl/s_axi_aresetn]
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins scope_ctrl/S_AXI]
+if {[get_bd_nets -of_objects [get_bd_pins scope_ctrl/s_axi_aclk]] ne [get_bd_nets -of_objects $pclk]} {
+    error "scope_ctrl laeuft nicht im Pixeltakt"
+}
+
+create_bd_cell -type module -reference iq_scope iq_scope
+connect_bd_net $pclk  [get_bd_pins iq_scope/aclk]
+connect_bd_net $prstn [get_bd_pins iq_scope/aresetn]
+connect_bd_net [get_bd_pins scope_ctrl/gpio_io_o] [get_bd_pins iq_scope/ctrl]
+
+connect_bd_intf_net [get_bd_intf_pins pattern_gen/m_axis_video] [get_bd_intf_pins iq_scope/s_axis_video]
+connect_bd_intf_net [get_bd_intf_pins iq_scope/m_axis_video] [get_bd_intf_pins video_out/video_in]
+
+# Spektrum: die I/Q-Daten gehen zusaetzlich in den Core iq_spectrum (HLS-IP: Fenster, FFT mit
+# 1024 Punkten, Blockmittelung der Leistung, Max-Hold). spec_trace (Verilog) zeichnet das
+# Ergebnis als Kurve in das Oszilloskop oder reicht die I/Q-Daten durch (ctrl[23]).
+#   Register von iq_spectrum: avg_log2 0x10, maxhold 0x18, spectra 0x20, overflows 0x30
+create_bd_cell -type ip -vlnv [latest_ip axis_broadcaster] iq_split
+set_property -dict [list \
+    CONFIG.NUM_MI {2} \
+    CONFIG.S_TDATA_NUM_BYTES {2} \
+    CONFIG.M_TDATA_NUM_BYTES {2} \
+    CONFIG.M00_TDATA_REMAP {tdata[15:0]} \
+    CONFIG.M01_TDATA_REMAP {tdata[15:0]}] [get_bd_cells iq_split]
+connect_bd_net $pclk  [get_bd_pins iq_split/aclk]
+connect_bd_net $prstn [get_bd_pins iq_split/aresetn]
+
+create_bd_cell -type ip -vlnv [latest_ip iq_spectrum] iq_spectrum
+connect_bd_net $pclk  [get_bd_pins iq_spectrum/ap_clk]
+connect_bd_net $prstn [get_bd_pins iq_spectrum/ap_rst_n]
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins iq_spectrum/s_axi_ctrl]
+if {[get_bd_nets -of_objects [get_bd_pins iq_spectrum/ap_clk]] ne [get_bd_nets -of_objects $pclk]} {
+    error "iq_spectrum laeuft nicht im Pixeltakt"
+}
+connect_bd_net [get_bd_pins pattern_start/dout] [get_bd_pins iq_spectrum/ap_start]
+
+create_bd_cell -type module -reference spec_trace spec_trace
+connect_bd_net $pclk  [get_bd_pins spec_trace/aclk]
+connect_bd_net $prstn [get_bd_pins spec_trace/aresetn]
+connect_bd_net [get_bd_pins scope_ctrl/gpio_io_o] [get_bd_pins spec_trace/ctrl]
+
+connect_bd_intf_net [get_bd_intf_pins iq_reader/m_axis_iq]     [get_bd_intf_pins iq_split/S_AXIS]
+connect_bd_intf_net [get_bd_intf_pins iq_split/M00_AXIS]       [get_bd_intf_pins spec_trace/s_axis_iq]
+connect_bd_intf_net [get_bd_intf_pins iq_split/M01_AXIS]       [get_bd_intf_pins iq_spectrum/s_axis_iq]
+connect_bd_intf_net [get_bd_intf_pins iq_spectrum/m_axis_spec] [get_bd_intf_pins spec_trace/s_axis_spec]
+connect_bd_intf_net [get_bd_intf_pins spec_trace/m_axis_xy]    [get_bd_intf_pins iq_scope/s_axis_iq]
 connect_bd_intf_net [get_bd_intf_pins video_tc/vtiming_out] [get_bd_intf_pins video_out/vtiming_in]
 connect_bd_net [get_bd_pins video_out/vtg_ce] [get_bd_pins video_tc/gen_clken]
 connect_bd_net [get_bd_pins video_out/sof_state_out] [get_bd_pins video_tc/sof_state]

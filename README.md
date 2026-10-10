@@ -19,18 +19,23 @@ BootROM ──► FSBL ──► Bitstream (PL) ──► U-Boot ──► boot.
 
 | Datei               | Zweck                                                        |
 |---------------------|--------------------------------------------------------------|
-| `build_hls.tcl`     | Vitis HLS: `hls/sine_gen.cpp` (Sinus) und `hls/pattern_gen.cpp` (HDMI-Testbild, Framebuffer-Leser) → C-Simulation, Synthese, Vivado-IP |
-| `cosim_hls.tcl`     | RTL-Co-Simulation von `pattern_gen` mit kleinem Bild (prüft den Framebuffer-Leser am AXI-Master) |
+| `build_hls.tcl`     | Vitis HLS: `hls/sine_gen.cpp` (Sinus), `hls/pattern_gen.cpp` (HDMI-Testbild, Framebuffer-Leser), `hls/iq_reader.cpp` (Leser für den I/Q-Ringpuffer) und `hls/iq_spectrum.cpp` (FFT, Mittelung, Max-Hold) → C-Simulation, Synthese, Vivado-IP |
+| `cosim_hls.tcl`     | RTL-Co-Simulation von `pattern_gen` (kleines Bild) und `iq_reader`; prüft die Leser am AXI-Master |
 | `create_hw.tcl`     | Vivado-Projekt: PS7 mit ZedBoard-Preset, AXI-GPIO (LEDs), Sinuston- und HDMI-Kette, Framebuffer-Anbindung, Bitstream, `system.xsa` |
 | `rtl/i2s_tx.v`      | I2S-Sender (Verilog) für den Audio-Codec; Testbench in `sim/` |
 | `rtl/clk_fwd.v`     | Takt-Ausgabe über ODDR (HDMI-Pixeltakt) |
+| `rtl/iq_scope.v`    | I/Q-Oszilloskop als Einblendung im Videostrom, Bildspeicher im Block-RAM; Testbench in `sim/` |
+| `rtl/spec_trace.v`  | zeichnet das Spektrum als Kurve in das Oszilloskop; Testbench in `sim/` |
+| `rtl/gen_palette.py`| erzeugt die Farbtabellen des Oszilloskops (`rtl/iq_palette.v`) |
 | `constraints/audio.xdc`, `hdmi.xdc` | Pins des Audio-Codecs ADAU1761 und des HDMI-Senders ADV7511 |
 | `build_petalinux.sh`| PetaLinux-Projekt aus XSA, ext4-Rootfs auf SD, Build, `BOOT.BIN`, `.wic` |
-| `target/`           | Werkzeuge fürs Board (`codec_init.sh`, `set_freq.sh`, `hdmi_init.sh`, `set_pattern.sh`, `fb_test.c`) und ihr Rezept; landen in `/usr/bin` |
-| `system-user.dtsi`  | Device-Tree-Ergänzungen (Konsole, Ethernet-PHY, SD, reservierter Speicher für die Framebuffer) |
+| `target/`           | Werkzeuge fürs Board (`codec_init.sh`, `set_freq.sh`, `hdmi_init.sh`, `set_pattern.sh`, `set_scope.sh`, `fb_test.c`, `iq_rx.c`) und ihr Rezept; landen in `/usr/bin` |
+| `target/hackrf.bb`  | Rezept für `libhackrf` und die HackRF-Werkzeuge (`hackrf_info`, `hackrf_transfer`, `hackrf_debug`, …) |
+| `system-user.dtsi`  | Device-Tree-Ergänzungen (Konsole, Ethernet-PHY, SD, reservierter Speicher für die Framebuffer und den I/Q-Ringpuffer) |
 | `prepare_sd.sh`     | SD-Karte manuell partitionieren und befüllen (bisher nicht getestet) |
 | `fb_rennrad.py`     | Testbild „Rennrad" auf dem PC zeichnen (Python, Pillow) und über `board.sh` in einen Framebuffer laden |
-| `board.sh`          | Board über das Netzwerk aktualisieren und bedienen (SSH), statt die Karte neu zu schreiben (getestet: Board finden, Befehle, Werkzeuge übertragen; noch nicht: geänderte Boot-Dateien mit Neustart) |
+| `hackrf_messreihe.sh` | Empfang vom HackRF bei steigender Abtastrate messen (startet `iq_rx` über `board.sh`), Tabelle mit CPU-Last und Lücken |
+| `board.sh`          | Board über das Netzwerk aktualisieren und bedienen (SSH), statt die Karte neu zu schreiben (getestet, auch mit geändertem `BOOT.BIN` und Neustart) |
 
 ## Voraussetzungen
 
@@ -104,7 +109,7 @@ Die Karte muss nur einmal mit einem Image geschrieben werden, das den SSH-Zugang
 
 ```bash
 ./board.sh deploy          # Werkzeuge und geänderte Boot-Dateien übertragen, bei Bedarf Neustart
-./board.sh tools           # nur Skripte und fb_test nach /usr/bin, ohne Neustart
+./board.sh tools           # nur Skripte und Programme nach /usr/bin, dazu die HackRF-Bibliotheken; ohne Neustart
 ./board.sh run fb_test     # Befehl auf dem Board ausführen (als root)
 ./board.sh find            # Adresse des Boards
 ```
@@ -150,6 +155,9 @@ Zum Vergleich mit dem Schaltplan: ZedBoard Hardware User's Guide, Abschnitt „C
 | Audio-Codec ADAU1761 | I2S aus `i2s_tx`, I2C über PS-I2C0 (EMIO), Adresse `0x38` |
 | Testbild-Generator | HLS-Core `pattern_gen` auf `0x40010000`, Register `pattern` `0x10`, `color` `0x18`, `format` `0x20`, `fb_addr0..2` `0x28`/`0x30`/`0x38`, `fb_frames` `0x40` |
 | Framebuffer       | 3 × 4 MiB im DDR auf `0x1E000000`, `0x1E400000`, `0x1E800000`; der Core liest sie über den HP0-Port des PS |
+| I/Q-Ringpuffer    | 16 MiB im DDR auf `0x1F000000`; HLS-Core `iq_reader` liest ihn über den HP1-Port des PS und speist das Oszilloskop. Register: `enable` `0x10`, `ring_addr` `0x18`, `ring_bytes` `0x20`, `wr_ptr` `0x28`, `rd_ptr` `0x30`, `samples` `0x40`, `seq_errors` `0x50` |
+| Spektrum          | HLS-Core `iq_spectrum` (FFT 1024, Blockmittelung, Max-Hold) bekommt dieselben I/Q-Daten; Register `avg_log2` `0x10`, `maxhold` `0x18`, `spectra` `0x20`, `overflows` `0x30`. `spec_trace` gibt das Ergebnis als Kurve an das Oszilloskop |
+| I/Q-Oszilloskop   | Verilog-Modul `iq_scope` im Videostrom hinter `pattern_gen`; Steuerwort über AXI-GPIO `scope_ctrl` (32 Bit, nur Ausgang, Adresse siehe `set_scope.sh`) |
 | HDMI-Sender ADV7511 | 16 Bit YCbCr 4:2:2 + Syncs aus `video_out`, I2C über PS-I2C1 (EMIO), Adresse `0x39` |
 | DIP-Schalter, Taster | nicht angeschlossen (Board-Interfaces `sws_8bits`, `btns_5bits` wären verfügbar) |
 
@@ -296,6 +304,154 @@ vitis-run --mode hls --tcl cosim_hls.tcl    # RTL-Co-Simulation, Bild 128x16 ("c
 gcc -O2 target/fb_test.c -o /tmp/fb_test -lm && /tmp/fb_test -o /tmp    # Bilder als /tmp/fb0.ppm .. fb2.ppm
 ```
 
+## I/Q-Oszilloskop
+
+`iq_scope` blendet in die Bildmitte ein Fenster von 1024 × 1024 Pixeln ein, das I nach rechts und Q nach oben
+aufträgt. Quelle ist das eingebaute Testsignal oder der I/Q-Strom aus dem Ringpuffer (siehe unten).
+Timing bei 148,5 MHz eingehalten.
+
+```bash
+hdmi_init.sh                         # nach jedem Start einmal
+set_scope.sh kreis                   # Testsignal: Kreis
+set_scope.sh lissajous               # Testsignal: Lissajous-Figur, die langsam wandert
+set_scope.sh farbe=glut nachleuchten=5
+set_scope.sh hintergrund=bild        # Testbild scheint durch, wo das Oszilloskop dunkel ist
+set_scope.sh aus
+set_scope.sh                         # Einstellung anzeigen
+```
+
+- **Bildspeicher:** 256 × 256 Zellen zu 16 Bit im Block-RAM (32 von 140 Block-RAMs, dazu einer für die Farbtabellen), kein Speicher im DDR. I und Q
+  haben je 8 Bit, jeder Abtastwert trifft also genau eine Zelle und erhöht sie um `schritt`.
+- **Anzeige:** jede Zelle ist 4 × 4 Pixel groß. Angezeigt wird der Zellwert, um `helligkeit` Bit nach rechts
+  geschoben und auf 255 begrenzt, über eine von vier Farbtabellen (`gruen`, `glut`, `eis`, `grau`).
+- **Nachleuchten:** einmal pro Bild wird jede Zelle um 1/2^n verkleinert (`nachleuchten=n`). Das erledigt die
+  Speicherseite, die auch anzeigt; die andere Seite gehört den Abtastwerten.
+- **Passende Werte:** viele Treffer pro Zelle (Träger, Testsignal) brauchen eine größere `helligkeit`-Zahl, wenige
+  (Rauschen, kurze Signale) eine kleinere oder einen größeren `schritt`.
+- Außerhalb des Fensters läuft das Bild von `pattern_gen` unverändert durch.
+
+Simulation: `bash sim/run_sim.sh iq_scope` prüft Durchleitung, Kreis, einzelne Punkte und das Abklingen.
+
+## I/Q-Daten in die PL
+
+Linux schreibt die Abtastwerte in einen Ringpuffer im DDR (16 MiB, `reserved-memory/iqring@1f000000`), der
+HLS-Core `iq_reader` liest sie über den HP1-Port und gibt sie als AXI4-Stream an das Oszilloskop.
+
+```bash
+set_scope.sh iq                      # Oszilloskop auf den I/Q-Eingang
+iq_rx -p -f 100e6 -s 10e6 -t 30      # vom HackRF in die PL
+iq_rx -z -s 16e6 -t 60               # Test ohne HackRF: Zählerdaten mit 16 Msps
+iq_rx -z -s 0 -t 5                   # Zählerdaten ungebremst: was schafft die Strecke?
+```
+
+- **Ablauf:** `iq_rx` kopiert jeden Block (262144 Byte) über `/dev/mem` in den Ring und schreibt dann den
+  Schreibzeiger ins Register `wr_ptr`. Der Core liest in Blöcken von 1024 Byte, sobald so viel bereitliegt, und
+  meldet seinen Lesezeiger in `rd_ptr`. Ist der Ring voll, verwirft `iq_rx -p` den Block und zählt einen Überlauf.
+- **Was „lückenlos" heißt:** kein Abtastwert fehlt. Die Werte kommen aber stoßweise in der PL an (Strom mit
+  `tvalid`), nicht im gleichmäßigen Abtasttakt.
+- **Prüfung in der PL:** der Core zählt die ausgegebenen Abtastwerte (`samples`) und die Sprünge, wenn man die
+  Daten als 16-Bit-Zähler liest (`seq_errors`). `iq_rx -z` schreibt solche Zählerdaten und vergleicht am Ende.
+- **Gemessen** (Zählerdaten, Oszilloskop als Abnehmer): 16 Msps über 5 s und 20 Msps über 60 s ohne Sprung und
+  ohne fehlenden Wert, CPU-Last etwa 17 % eines Kerns. Ungebremst gehen 22,9 Msps durch; die Grenze setzt das
+  Oszilloskop, das 6 Takte pro Abtastwert braucht (148,5 MHz / 6 = 24,75 Msps), nicht das Schreiben in den Ring.
+- **Mit dem HackRF gemessen** (`iq_rx -p`): 10 Msps über 20 s und 16 Msps über 60 s lückenlos – keine Lücke
+  laut HackRF, kein Ring-Überlauf, und der Core hat genau so viele Abtastwerte gezählt, wie geschrieben wurden
+  (960 102 400 bei 16 Msps). CPU-Last 19 % bei 10 Msps, 30 % bei 16 Msps; der Ring war nie über 1 % gefüllt.
+- Für ein Bild auf dem Oszilloskop einen starken Sender in die Mitte nehmen und die Verstärkung so wählen, dass
+  der Pegel bei etwa −10 dBFS liegt, z. B. `iq_rx -p -f 93.7e6 -s 2e6 -l 32 -g 28 -t 600`.
+- Zählerdaten ergeben auf dem Oszilloskop ein gleichmäßig gefülltes Fenster, weil alle Zellen gleich oft
+  getroffen werden.
+
+Simulation: `HLS_ONLY=iq_reader vitis-run --mode hls --tcl cosim_hls.tcl` (C-Simulation und RTL-Co-Simulation).
+
+## Spektrum
+
+Der Core `iq_spectrum` rechnet aus den I/Q-Daten laufend ein Spektrum, `spec_trace` zeichnet es als Kurve in das
+Fenster des Oszilloskops: Frequenz nach rechts, Pegel nach oben.
+
+```bash
+iq_rx -p -f 100e6 -s 10e6 -t 600 &   # Daten in die PL
+set_scope.sh spektrum                # Spektrum statt X/Y-Bild
+set_scope.sh mittelung=6             # über 2^6 = 64 Blöcke mitteln (0..10)
+set_scope.sh maxhold=1               # Max-Hold-Kurve dazu; maxhold=neu beginnt sie neu, maxhold=0 aus
+set_scope.sh iq                      # zurück zum X/Y-Bild
+```
+
+- **Rechnung:** je 1024 Abtastwerte mit Hann-Fenster, FFT (Xilinx-FFT-IP über `hls::fft`), Leistung je Linie.
+  Die Blöcke folgen lückenlos aufeinander, ohne Überlappung.
+- **Blockmittelung:** die Leistungen von 2^n Blöcken werden je Linie aufsummiert und gemittelt (Mittelung der
+  Leistung, nicht der dB-Werte). Erst danach geht ein Spektrum zur Anzeige; bei 10 Msps und `mittelung=6` sind das
+  etwa 150 Spektren pro Sekunde, bei `mittelung=10` etwa 10.
+- **Max-Hold:** je Linie der größte gemittelte Pegel seit dem letzten Löschen, als zweite Kurve gezeichnet.
+- **Achsen:** das Fenster ist so breit wie die Abtastrate, die Mittenfrequenz liegt auf dem senkrechten Strich.
+  Je Spalte sind 4 der 1024 Linien zu einem senkrechten Strich zusammengefasst (kleinster bis größter Pegel).
+  Die ganze Höhe sind 96 dB (0,376 dB pro Zelle), der obere Rand ist Vollaussteuerung
+  (Träger mit Amplitude 128), der waagerechte Strich liegt bei −48 dBFS. Leere Linien stehen bei Zelle 31 von 255.
+- **Anzeige:** `spec_trace` zeichnet die Kurve etwa 71 mal pro Sekunde neu, unabhängig davon, wie oft ein neues
+  Spektrum kommt; jede Zelle der Kurve wird dabei einmal getroffen. `set_scope.sh spektrum` stellt dazu
+  `nachleuchten=2 schritt=32 helligkeit=0` ein. Längeres Nachleuchten lässt alte Kurven stehen.
+- Ohne laufendes `iq_rx -p` kommen keine Daten, die Kurve bleibt dann auf dem letzten Stand stehen.
+
+Simulation: `HLS_ONLY=iq_spectrum vitis-run --mode hls --tcl build_hls.tcl` (C-Simulation mit Trägern und
+Rauschen), `bash sim/run_sim.sh spec_trace` (Kurve).
+
+Auf dem Board gemessen: Zählerdaten (`iq_rx -z`) ergaben aus 60 030 976 Abtastwerten bei `mittelung=4` genau
+3664 Spektren, also wird jeder Block verrechnet. Mit dem HackRF bei 10 Msps (`-f 98e6`, UKW) etwa 630 Spektren
+pro Sekunde, 0 FFT-Überläufe, Datenweg lückenlos, CPU 19 %.
+
+## HackRF an USB
+
+Das HackRF hängt an der USB-OTG-Buchse J13 des ZedBoards, Linux empfängt die I/Q-Daten über `libhackrf`.
+Getestet mit einem HackRF One r9 mit PortaPack (Mayhem-Firmware v2.0.1) im HackRF-Modus, JP2 und JP3 gesteckt,
+ohne Hub.
+
+Messreihe (`./hackrf_messreihe.sh 30`, je 30 Sekunden, Daten verworfen):
+
+| Abtastrate | Datenrate | CPU-Last | Lücken | Ergebnis |
+|-----------:|----------:|---------:|-------:|----------|
+| 2 Msps     | 4 MB/s    | 3 %      | 0      | lückenlos |
+| 4 Msps     | 8 MB/s    | 6 %      | 0      | lückenlos |
+| 8 Msps     | 16 MB/s   | 13 %     | 0      | lückenlos |
+| 10 Msps    | 20 MB/s   | 16 %     | 0      | lückenlos |
+| 12,5 Msps  | 25 MB/s   | 20 %     | 0      | lückenlos |
+| 16 Msps    | 32 MB/s   | 25 %     | 0      | lückenlos |
+| 18 Msps    | 36 MB/s   | 28 %     | 11     | Lücken nur in der ersten Sekunde, danach keine mehr |
+| 20 Msps    | 36,8 statt 40 MB/s | 29 % | rund 4500 pro Sekunde | geht nicht |
+
+Die Grenze liegt bei etwa 36,9 MB/s. Die CPU-Last (100 % = ein Kern) ist dabei gering, der Engpass ist also die
+USB-Strecke des Zynq und nicht der Prozessor. Sicher nutzbar sind Abtastraten bis 16 Msps.
+
+**Anschluss**
+
+- J13 ist eine Micro-USB-Buchse: Micro-USB-OTG-Adapter (Micro-A-Stecker auf USB-A-Buchse), daran das Kabel zum HackRF.
+- JP2 stecken (5 V auf VBUS) und JP3 stecken (großer VBUS-Kondensator für Host-Betrieb). So steht es in der
+  Jumper-Tabelle des ZedBoard Hardware User's Guide; am Board noch nicht geprüft. Ab Werk sind beide offen.
+- Der USB-Controller läuft im Image bereits als Host (`dr_mode = "host"`, 480 Mbit/s), am Kernel ist nichts zu ändern.
+- VBUS liefert nur etwa 500 mA. Meldet sich das HackRF nicht oder fällt es beim Empfang aus: Hub mit eigener Versorgung.
+- PortaPack (Mayhem): im Hauptmenü „HackRF" wählen, dann verhält sich das Gerät am USB wie ein HackRF One.
+  `hackrf_info` zeigt dabei die Versionsnummer der Mayhem-Firmware. Zurück mit der Reset-Taste.
+
+**Prüfen und empfangen**
+
+```bash
+./board.sh run hackrf_info                    # Gerät, Seriennummer, Firmware
+./board.sh run iq_rx                          # 100 MHz, 10 Msps, 10 Sekunden, Daten verwerfen
+./board.sh run iq_rx -f 433.92e6 -s 8e6 -t 60
+./board.sh run iq_rx -l 24 -g 30 -a           # LNA 0–40 dB, VGA 0–62 dB, -a = HF-Vorverstärker ein
+./board.sh run iq_rx -t 2 -o /tmp/daten.iq    # in eine Datei schreiben ("-" = Standardausgabe)
+./hackrf_messreihe.sh                         # 2, 4, 8, 10, 12.5, 16 und 20 Msps nacheinander, Tabelle
+```
+
+- Datenformat: 8 Bit mit Vorzeichen, abwechselnd I und Q, also 2 Byte pro Abtastwert. 10 Msps sind 20 MB/s,
+  die höchste Rate von 20 Msps sind 40 MB/s.
+- `iq_rx` gibt jede Sekunde Datenrate, Pegel (0 dBFS = Vollaussteuerung), CPU-Last (100 % = ein Kern) und die Zahl
+  der Lücken aus. Die Lücken zählt das HackRF selbst: sein Puffer war voll, weil der Rechner die Daten nicht schnell
+  genug abgeholt hat. Am Ende steht `ERGEBNIS: lueckenlos` (Rückgabe 0) oder `NICHT lueckenlos` (Rückgabe 1).
+- Kennt die Firmware den Lückenzähler nicht, urteilt `iq_rx` nur nach der Datenrate und sagt das dazu.
+- Spitze bei 0 dBFS heißt Übersteuerung: Verstärkung verringern.
+- `/tmp` liegt im RAM: 2 Sekunden bei 10 Msps sind 40 MB. Das Schreiben auf die SD-Karte ist langsamer als der
+  Datenstrom und erzeugt Lücken.
+
 ## Typische Anpassungen
 
 - **Kernel-Optionen:** `petalinux-config -c kernel`
@@ -325,6 +481,15 @@ gcc -O2 target/fb_test.c -o /tmp/fb_test -lm && /tmp/fb_test -o /tmp    # Bilder
 | Testbild 7: Bild läuft durch, reißt oder Monitor verliert das Signal | Der Leser kommt nicht nach (FIFO läuft leer). Tritt es bei Testbild 1 nicht auf, liegt es an der Speicherstrecke |
 | `fb_test`: „nicht genau 3 Knoten reserved-memory/framebuffer@..." | Device Tree ohne die Ergänzung aus `system-user.dtsi` gebaut; `ls /proc/device-tree/reserved-memory` |
 | `fb_test`: „Ruecklesen stimmt nicht"          | Speicherbereich wird doch von Linux benutzt: `cat /proc/iomem` darf dort kein „System RAM" zeigen |
+| `iq_rx`: „kein HackRF gefunden"           | `./board.sh run 'dmesg \| tail'` nach dem Einstecken: erscheint dort kein neues USB-Gerät, fehlt VBUS (JP2) oder der OTG-Adapter passt nicht. PortaPack im HackRF-Modus? |
+| `hackrf_info`: „No HackRF boards found", in `dmesg` steht `ci_hdrc ... unable to init phy: -110` | Der USB-Baustein des Boards hat nach einem Neustart per `reboot` nicht geantwortet (einmal beobachtet, Ursache offen). Board aus- und einschalten |
+| `iq_rx -p`/`-z`: „Knoten iq_reader@... nicht im Device Tree" | Auf dem Board läuft noch ein Bitstream ohne `iq_reader`: `./board.sh deploy` |
+| `iq_rx -p`: Ring-Überläufe                   | Die PL nimmt die Daten nicht schnell genug ab; `iq_rx -z -s 0` zeigt, was die Strecke schafft |
+| `hackrf_info`: „No HackRF boards found" nach einem Neustart des Boards | Das PortaPack ist dabei in seine eigene Oberfläche zurückgefallen: wieder „HackRF" wählen |
+| `iq_rx`: Lücken schon bei kleiner Abtastrate | Schreibt `-o` auf die SD-Karte? Läuft daneben etwas Rechenintensives? Sonst Versorgung prüfen (Hub mit Netzteil) |
+| `set_scope.sh`: „AXI-GPIO des Oszilloskops nicht im Device Tree" | Auf dem Board läuft noch ein Bitstream ohne `iq_scope`: `./board.sh deploy` |
+| Oszilloskop: Fenster bleibt schwarz        | `helligkeit` zu groß oder `schritt` zu klein; mit `set_scope.sh kreis helligkeit=0` muss ein weißer Kreis erscheinen |
+| Oszilloskop: alles weiß oder Fläche statt Linie | `helligkeit` vergrößern oder `nachleuchten` verkleinern |
 | `codec_init.sh`: „Codec antwortet nicht"  | Bitstream geladen (ohne MCLK reagiert der Codec nicht)? `i2cdetect -y <bus>` muss `38` zeigen |
 
 ## Hinweis zu PetaLinux-Versionen

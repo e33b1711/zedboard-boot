@@ -7,6 +7,30 @@
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
+
+	/*
+	 * Drei Framebuffer fuer den HDMI-Testbild-Generator (1920x1080, 2 Byte pro Pixel
+	 * = 4147200 Byte, je 4 MiB reserviert). Linux nutzt diesen Speicher nicht; der
+	 * Core liest ihn ueber den HP0-Port, fb_test beschreibt ihn ueber /dev/mem.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		fb0: framebuffer@1e000000 {
+			reg = <0x1e000000 0x400000>;
+			no-map;
+		};
+		fb1: framebuffer@1e400000 {
+			reg = <0x1e400000 0x400000>;
+			no-map;
+		};
+		fb2: framebuffer@1e800000 {
+			reg = <0x1e800000 0x400000>;
+			no-map;
+		};
+	};
 };
 
 /* Ethernet: Marvell 88E1518 PHY auf MDIO-Adresse 0 */

@@ -59,7 +59,7 @@ if [[ -f "$SCRIPT_DIR/system-user.dtsi" ]]; then
     cp "$SCRIPT_DIR/system-user.dtsi" "$DTSI_DST"
 fi
 
-# --- Skripte fuers Board (Sinuston, HDMI-Testbild) und i2c-tools ins Rootfs --
+# --- Werkzeuge fuers Board (Sinuston, HDMI-Testbild, Framebuffer) und i2c-tools ins Rootfs --
 APP_DIR=project-spec/meta-user/recipes-apps/zed-tools
 USER_ROOTFS=project-spec/meta-user/conf/user-rootfsconfig
 # Vorgaenger-Rezept aus aelteren Projektstaenden entfernen
@@ -69,7 +69,24 @@ sed -i -E '/^(# )?CONFIG_zed-tone[= ]/d' "$ROOTFS_CFG"
 
 mkdir -p "$APP_DIR/files"
 cp "$SCRIPT_DIR/target/zed-tools.bb" "$APP_DIR/"
-cp "$SCRIPT_DIR"/target/*.sh "$APP_DIR/files/"
+cp "$SCRIPT_DIR"/target/*.sh "$SCRIPT_DIR"/target/*.c "$APP_DIR/files/"
+
+# --- SSH fuer board.sh: fester Host-Schluessel und Schluessel des PCs fuer root --
+# Der Host-Schluessel liegt in ./keys (nicht im Git) und bleibt ueber alle Builds gleich,
+# damit board.sh das Board daran wiedererkennt. ZED_SSH_PUBKEY waehlt den PC-Schluessel.
+KEY_DIR="$SCRIPT_DIR/keys"
+mkdir -p "$KEY_DIR"
+[[ -f "$KEY_DIR/ssh_host_ed25519_key" ]] \
+    || ssh-keygen -q -t ed25519 -N "" -C "zedboard" -f "$KEY_DIR/ssh_host_ed25519_key"
+cp "$KEY_DIR/ssh_host_ed25519_key" "$KEY_DIR/ssh_host_ed25519_key.pub" "$APP_DIR/files/"
+PUBKEY="${ZED_SSH_PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
+if [[ -f "$PUBKEY" ]]; then
+    cp "$PUBKEY" "$APP_DIR/files/authorized_keys"
+else
+    echo "WARN: $PUBKEY fehlt – kein SSH-Zugang ohne Passwort (ssh-keygen -t ed25519, dann neu bauen)."
+    : > "$APP_DIR/files/authorized_keys"
+fi
+
 grep -qx 'CONFIG_zed-tools' "$USER_ROOTFS" || echo 'CONFIG_zed-tools' >> "$USER_ROOTFS"
 setcfg CONFIG_zed-tools y "$ROOTFS_CFG"
 setcfg CONFIG_i2c-tools y "$ROOTFS_CFG"

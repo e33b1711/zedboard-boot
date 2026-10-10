@@ -10,6 +10,9 @@
 # Simulation (sim/run_sim.sh)
 /sim/work/
 
+# --- SSH-Schluessel des Boards und zuletzt benutzte Adresse (board.sh) --------
+/keys/
+
 # --- Logs und temporaere Dateien der Xilinx-Tools ----------------------------
 *.log
 *.jou

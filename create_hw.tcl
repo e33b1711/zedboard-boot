@@ -10,6 +10,7 @@
 #           + AXI-GPIO an den 8 User-LEDs
 #           + Sinuston auf Line Out: HLS-Sinus-Generator -> I2S -> ADAU1761
 #           + HDMI-Testbild 1080p60: HLS-Testbild-Generator -> Video Out -> ADV7511
+#           + drei Framebuffer im DDR, vom Testbild-Generator ueber den HP0-Port gelesen
 # =============================================================================
 
 set proj_name zedboard_hw
@@ -143,6 +144,7 @@ foreach {port pin} {ac_mclk i2s_mclk ac_bclk i2s_bclk ac_lrclk i2s_lrclk ac_sdat
 
 # --- HDMI: Testbild-Generator (HLS) -> Video Out -> ADV7511 -------------------
 #   Bildauswahl: AXI-Lite-Register des HLS-Cores (pattern 0x10, color 0x18, format 0x20)
+#   Framebuffer: der Core liest ueber seinen AXI-Master aus dem DDR des PS (HP0-Port)
 #   1920x1080 bei 60 Hz, Pixeltakt 148,5 MHz, 16 Bit YCbCr 4:2:2
 #   Kein Linux-Treiber: der ADV7511 wird per Skript ueber I2C eingerichtet
 
@@ -179,6 +181,24 @@ apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
 if {[get_bd_nets -of_objects [get_bd_pins pattern_gen/ap_clk]] ne [get_bd_nets -of_objects $pclk]} {
     error "pattern_gen laeuft nicht im Pixeltakt"
 }
+
+# Der Core laeuft frei: ap_start fest auf 1
+create_bd_cell -type ip -vlnv [latest_ip xlconstant] pattern_start
+set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}] [get_bd_cells pattern_start]
+connect_bd_net [get_bd_pins pattern_start/dout] [get_bd_pins pattern_gen/ap_start]
+
+# Framebuffer: AXI-Master des Cores (AXI4, Pixeltakt) -> HP0-Port des PS (AXI3, 100 MHz).
+# Der SmartConnect uebernimmt Taktuebergang und Protokoll; der HP-Port bleibt auf 100 MHz,
+# damit die Pfade ins PS nicht am knappen Pixeltakt haengen.
+set_property -dict [list CONFIG.PCW_USE_S_AXI_HP0 {1}] [get_bd_cells ps7]
+connect_bd_net $fclk [get_bd_pins ps7/S_AXI_HP0_ACLK]
+create_bd_cell -type ip -vlnv [latest_ip smartconnect] fb_axi
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1} CONFIG.NUM_CLKS {2}] [get_bd_cells fb_axi]
+connect_bd_net $pclk  [get_bd_pins fb_axi/aclk]
+connect_bd_net $fclk  [get_bd_pins fb_axi/aclk1]
+connect_bd_net $prstn [get_bd_pins fb_axi/aresetn]
+connect_bd_intf_net [get_bd_intf_pins pattern_gen/m_axi_fb] [get_bd_intf_pins fb_axi/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins fb_axi/M00_AXI] [get_bd_intf_pins ps7/S_AXI_HP0]
 
 # Timing-Generator 1080p60 (feste Einstellung, ohne AXI-Lite)
 create_bd_cell -type ip -vlnv [latest_ip v_tc] video_tc

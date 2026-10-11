@@ -26,12 +26,15 @@ BootROM ──► FSBL ──► Bitstream (PL) ──► U-Boot ──► boot.
 | `rtl/clk_fwd.v`     | Takt-Ausgabe über ODDR (HDMI-Pixeltakt) |
 | `rtl/iq_scope.v`    | I/Q-Oszilloskop als Einblendung im Videostrom, Bildspeicher im Block-RAM; Testbench in `sim/` |
 | `rtl/spec_trace.v`  | zeichnet das Spektrum als Kurve in das Oszilloskop; Testbench in `sim/` |
+| `rtl/irq_timer.v`   | misst die Laufzeit eines Interrupts von der PL bis zur Antwort von Linux (AXI-Lite, Statistik in der PL); Testbench in `sim/` |
+| `rtl/oled_mux.v`    | Leitungen der OLED-Anzeige: Takt und Daten vom SPI-Core oder zur Fehlersuche von Hand aus dem Steuerwort |
 | `rtl/gen_palette.py`| erzeugt die Farbtabellen des Oszilloskops (`rtl/iq_palette.v`) |
-| `constraints/audio.xdc`, `hdmi.xdc` | Pins des Audio-Codecs ADAU1761 und des HDMI-Senders ADV7511 |
+| `constraints/audio.xdc`, `hdmi.xdc`, `oled.xdc` | Pins des Audio-Codecs ADAU1761, des HDMI-Senders ADV7511 und der OLED-Anzeige |
 | `build_petalinux.sh`| PetaLinux-Projekt aus XSA, ext4-Rootfs auf SD, Build, `BOOT.BIN`, `.wic` |
-| `target/`           | Werkzeuge fürs Board (`codec_init.sh`, `set_freq.sh`, `hdmi_init.sh`, `set_pattern.sh`, `set_scope.sh`, `fb_test.c`, `iq_rx.c`) und ihr Rezept; landen in `/usr/bin` |
+| `target/`           | Werkzeuge fürs Board (`codec_init.sh`, `set_freq.sh`, `hdmi_init.sh`, `set_pattern.sh`, `set_scope.sh`, `fb_test.c`, `iq_rx.c`, `irq_test.c`, `oled.c`) und ihr Rezept; landen in `/usr/bin` |
+| `target/oled.h`, `oled_font.h` | Ansteuerung der OLED-Anzeige (von `oled.c` und `irq_test.c` eingebunden) und ihr Zeichensatz, erzeugt von `target/gen_oled_font.py` |
 | `target/hackrf.bb`  | Rezept für `libhackrf` und die HackRF-Werkzeuge (`hackrf_info`, `hackrf_transfer`, `hackrf_debug`, …) |
-| `system-user.dtsi`  | Device-Tree-Ergänzungen (Konsole, Ethernet-PHY, SD, reservierter Speicher für die Framebuffer und den I/Q-Ringpuffer) |
+| `system-user.dtsi`  | Device-Tree-Ergänzungen (Konsole, Ethernet-PHY, SD, reservierter Speicher für die Framebuffer und den I/Q-Ringpuffer, `irq_timer` als UIO-Gerät, SPI-Core der OLED-Anzeige abgeschaltet) |
 | `prepare_sd.sh`     | SD-Karte manuell partitionieren und befüllen (bisher nicht getestet) |
 | `fb_rennrad.py`     | Testbild „Rennrad" auf dem PC zeichnen (Python, Pillow) und über `board.sh` in einen Framebuffer laden |
 | `hackrf_messreihe.sh` | Empfang vom HackRF bei steigender Abtastrate messen (startet `iq_rx` über `board.sh`), Tabelle mit CPU-Last und Lücken |
@@ -158,6 +161,8 @@ Zum Vergleich mit dem Schaltplan: ZedBoard Hardware User's Guide, Abschnitt „C
 | I/Q-Ringpuffer    | 16 MiB im DDR auf `0x1F000000`; HLS-Core `iq_reader` liest ihn über den HP1-Port des PS und speist das Oszilloskop. Register: `enable` `0x10`, `ring_addr` `0x18`, `ring_bytes` `0x20`, `wr_ptr` `0x28`, `rd_ptr` `0x30`, `samples` `0x40`, `seq_errors` `0x50` |
 | Spektrum          | HLS-Core `iq_spectrum` (FFT 1024, Blockmittelung, Max-Hold) bekommt dieselben I/Q-Daten; Register `avg_log2` `0x10`, `maxhold` `0x18`, `spectra` `0x20`, `overflows` `0x30`. `spec_trace` gibt das Ergebnis als Kurve an das Oszilloskop |
 | I/Q-Oszilloskop   | Verilog-Modul `iq_scope` im Videostrom hinter `pattern_gen`; Steuerwort über AXI-GPIO `scope_ctrl` (32 Bit, nur Ausgang, Adresse siehe `set_scope.sh`) |
+| Interrupt-Laufzeit | Verilog-Modul `irq_timer` auf `0x40050000` an FCLK0 (100 MHz), IRQ an `IRQ_F2P[0]` des PS (SPI 61, im Device Tree `<0 29 4>`); Register siehe unten |
+| OLED-Anzeige (SSD1306, 128 × 32) | AXI Quad SPI `oled_spi` auf `0x44A00000` für Takt und Daten (3,125 MHz), AXI-GPIO `oled_ctrl` auf `0x40060000` mit 7 Ausgängen: Bit 0 D/C, 1 RES, 2 VBAT, 3 VDD (bei 0 aktiv), Bit 4 bis 6 Takt und Daten von Hand (`rtl/oled_mux.v`) |
 | HDMI-Sender ADV7511 | 16 Bit YCbCr 4:2:2 + Syncs aus `video_out`, I2C über PS-I2C1 (EMIO), Adresse `0x39` |
 | DIP-Schalter, Taster | nicht angeschlossen (Board-Interfaces `sws_8bits`, `btns_5bits` wären verfügbar) |
 
@@ -399,6 +404,122 @@ Auf dem Board gemessen: Zählerdaten (`iq_rx -z`) ergaben aus 60 030 976 Abtastw
 3664 Spektren, also wird jeder Block verrechnet. Mit dem HackRF bei 10 Msps (`-f 98e6`, UKW) etwa 630 Spektren
 pro Sekunde, 0 FFT-Überläufe, Datenweg lückenlos, CPU 19 %.
 
+## Interrupt-Laufzeit
+
+Wie lange braucht Linux, um auf einen Interrupt aus der PL zu antworten? Das Modul `irq_timer` setzt den IRQ und
+merkt sich den Stand seines Zeitzählers (Start). Das Programm `irq_test` wird von Linux geweckt und schreibt über
+AXI-Lite eine Quittung; in dem Takt, in dem dieser Schreibzugriff ankommt, hält das Modul die Zeit an (Stopp).
+
+```
+irq_timer ──IRQ_F2P[0]──► GIC ──► Kernel (uio_pdrv_genirq) ──► irq_test (read auf /dev/uioN)
+    ▲                                                              │
+    └──────────── AXI-Lite: ACK in STATUS = Stopp ◄────────────────┘
+```
+
+```bash
+irq_test                       # 10000 Messungen, Pause 1 ms plus bis zu 0,66 ms Zufall
+irq_test -n 100000 -r 80       # mit Echtzeit-Priorität (SCHED_FIFO 80)
+irq_test -c 1 -H               # an Kern 1 gebunden, mit Verteilung der Laufzeiten
+irq_test -i 100 -j 0 -n 0      # alle 100 µs ohne Zufall, bis Strg-C
+irq_test -b                    # Vergleich ohne Interrupt: Statusregister in einer Schleife abfragen
+irq_test -d -n 0               # Mittelwert und größte Laufzeit laufend auf der OLED-Anzeige (siehe unten)
+```
+
+- **Zeitbasis:** ein frei laufender 32-Bit-Zähler in der PL an FCLK0, ein Schritt sind 10 ns. Start und Stopp
+  sind Stände dieses einen Zählers; die Laufzeit ist genau die Zahl der Takte, in denen der IRQ gesetzt war.
+  Das Modul hängt ohne Taktübergang am 100-MHz-Bus.
+- **Statistik in der PL:** Anzahl, Summe, Quadratsumme (96 Bit), kleinste und größte Laufzeit. `irq_test` rechnet
+  daraus den Mittelwert, den Jitter als Standardabweichung (√(Quadratsumme/n − Mittelwert²)) und nennt die
+  größte Laufzeit als schlechtesten Fall. Es geht also keine Messung verloren, auch wenn das Programm nicht mitkommt.
+- **Median und Verteilung** zählt `irq_test` aus den einzelnen Laufzeiten (Register `LAST`) in Fächern von 1 µs.
+  Das Lesen liegt nach dem Stopp, verlängert die Messung also nicht.
+- **Nummer des schlechtesten Falls:** `irq_test` nennt zur größten Laufzeit die Nummer ihrer Messung (die erste
+  hat die Nummer 1), auch auf der OLED-Anzeige (`worst 97us #1247`).
+- **Vorlauf:** vor der Messung läuft ein Durchgang, der nicht zählt. Ohne ihn war die erste Messung regelmäßig
+  erhöht (76 bis 109 µs statt etwa 42 µs) und stand in ruhigen Läufen als schlechtester Fall da (in 3 von 21
+  Läufen). Die großen Ausreißer verteilen sich über den ganzen Lauf.
+- **Pause:** nach jedem Stopp wartet das Modul `INTERVAL` Takte plus eine Zufallszahl (`RAND_MASK`), damit die
+  Messung nicht im Gleichschritt mit dem Zeittakt von Linux (100 Hz) läuft. `-j` wird auf 2^k − 1 Takte abgerundet.
+- **Was gemessen wird:** die ganze Strecke Interrupt-Controller → Kernel → Wechsel in das Programm → Schreibzugriff
+  über den GP0-Port. `irq_test -b` zeigt zum Vergleich die Strecke ohne Interrupt (Lesen und Schreiben über AXI-Lite).
+- **Treiber:** `system-user.dtsi` gibt dem Knoten `irq_timer@40050000` den Namen `generic-uio`; der Treiber
+  `uio_pdrv_genirq` übernimmt ihn nur mit dem Parameter `of_id=generic-uio` (`/etc/modprobe.d/uio.conf` im Image).
+  udev lädt das Modul beim Start von selbst; auf einer Karte ohne diese Datei lädt `irq_test` es neu. Der Treiber sperrt den IRQ bei jedem Auftreten,
+  `irq_test` gibt ihn nach der Quittung wieder frei.
+- Kernel: 6.12 mit `CONFIG_PREEMPT`, kein PREEMPT_RT. Ausreißer im Millisekundenbereich sind damit zu erwarten.
+
+| Register | Offset | Inhalt |
+|----------|--------|--------|
+| `CTRL` | `0x00` | Bit 0 `enable`; Bit 1 `clear` (nur schreiben): Statistik löschen |
+| `STATUS` | `0x04` | lesen: Bit 0 IRQ gesetzt, Bit 1 `LIMIT` erreicht, Bit 2 Laufzeit über 2^32 − 1 Takte (42,9 s); schreiben: Bit 0 = 1 quittiert (Stopp) |
+| `INTERVAL`, `RAND_MASK` | `0x08`, `0x0C` | Pause in Takten und Maske für den zufälligen Zuschlag |
+| `LIMIT` | `0x10` | Zahl der Messungen (0 = ohne Ende) |
+| `COUNT`, `LAST`, `MIN`, `MAX` | `0x14` bis `0x20` | Anzahl, letzte, kleinste und größte Laufzeit in Takten |
+| `SUM` | `0x24`, `0x28` | Summe der Laufzeiten, 64 Bit |
+| `SQ` | `0x2C`, `0x30`, `0x34` | Summe der Quadrate, 96 Bit |
+| `NOW`, `CLK_HZ` | `0x38`, `0x3C` | Zeitzähler und Takte pro Sekunde |
+
+Auf dem Board gemessen (je 50 000 Messungen, `-i 300 -j 300`, Board sonst ohne Last):
+
+| Aufruf | Mittelwert | Jitter (σ) | kleinste | größte | 99,9 % unter |
+|--------|-----------:|-----------:|---------:|-------:|-------------:|
+| `irq_test` (normale Priorität) | 42,9 µs | 3,0 µs | 38,8 µs | 152 µs | 73 µs |
+| `irq_test -r 80` | 36,9 µs | 2,9 µs | 29,3 µs | 106 µs | 65 µs |
+| `irq_test -r 80 -c 1` | 35,6 µs | 2,7 µs | 27,5 µs | 77 µs | 62 µs |
+| `irq_test -b` (ohne Interrupt) | 0,42 µs | 5,4 µs | 0,22 µs | 434 µs | 11 µs |
+
+Der Kernel hat dabei genau so viele Interrupts gezählt wie der Core Messungen (`grep irq_timer /proc/interrupts`).
+In einem Lauf mit 5000 Messungen bei normaler Priorität lag ein einzelner Ausreißer bei 2,24 ms. Unter Last
+(HackRF-Empfang, SD-Karte) ist noch nicht gemessen.
+
+Simulation: `bash sim/run_sim.sh irq_timer` prüft die Laufzeit taktgenau gegen die Dauer des IRQ, dazu Statistik,
+`LIMIT`, Pause, Löschen und Abschalten.
+
+## OLED-Anzeige
+
+Die Anzeige des ZedBoards (128 × 32 Pixel, Controller SSD1306) zeigt zwei Zeilen Text zu je 16 Zeichen.
+
+```
+oled / irq_test ──/dev/mem──► AXI Quad SPI (oled_spi) ──SCLK, SDIN──► SSD1306
+                └────────────► AXI-GPIO (oled_ctrl) ──D/C, RES, VBAT, VDD──┘   (dazwischen oled_mux)
+```
+
+```bash
+oled "ZedBoard" "Zeile 2"      # Text anzeigen; schaltet die Anzeige bei Bedarf ein
+oled -u "ZedBoard"             # Bild um 180 Grad gedreht
+oled aus                       # Anzeige abschalten
+irq_test -d                    # Messung der Interrupt-Laufzeit: "mean" und "worst" mit Nummer der Messung, einmal pro Sekunde
+irq_test -u                    # wie -d, Bild um 180 Grad gedreht
+```
+
+- **Ansteuerung ohne Kernel-Treiber:** die Programme schreiben die Register der beiden Cores über `/dev/mem`
+  (`target/oled.h`). Der SPI-Knoten ist in `system-user.dtsi` abgeschaltet, damit der Treiber `spi-xilinx` ihn
+  nicht belegt. Im Kernel fehlen `spidev` und ein Treiber für den SSD1306; der Weg über den Kernel bräuchte
+  eine neue Kernel-Konfiguration und eine neu geschriebene Karte, die Hardware bliebe dieselbe.
+- **Kein Bildspeicher in der PL:** das Bild liegt im Controller der Anzeige. Ein Text sind 1024 Byte über SPI
+  (knapp 3 ms) und bleibt stehen, auch wenn das Programm endet.
+- **Einschalten:** Folge und Befehle wie im ZedBoard-Beispiel von Digilent: alles aus, Logikversorgung (VDD),
+  `AE`, Reset, Ladungspumpe (`8D 14`, `D9 F1`), Versorgung der Anzeige (VBAT), 200 ms warten, `81 0F`, `A0`, `C0`,
+  `DA 20`, `AF`. Jeder Programmstart durchläuft sie ganz, die Anzeige ist dabei etwa 1 s dunkel. Das Aus- und
+  Einschalten bringt auch den Bitzähler der Anzeige wieder in Tritt; sie hat keinen Chip Select.
+- **64 statt 32 Zeilen:** der Controller bleibt auf seiner Vorgabe von 64 Zeilen, das Bild wird deshalb in beide
+  Hälften seines Speichers geschrieben. Mit dem sonst üblichen Befehl für 32 Zeilen (`A8 1F`) blieb die Anzeige
+  auf dem Board dunkel (in zwei Versuchsreihen; vermutlich liegen die 32 Zeilen des Glases mit `DA 20` auf der
+  anderen Hälfte der Zeilenleitungen).
+- **SPI-Takt:** 3,125 MHz wie im Beispiel von Digilent, Modus 0. Ob auch 6,25 MHz gingen, ist offen: der erste
+  Bitstream lief damit, aber immer zusammen mit `A8 1F`.
+- **Fehlersuche ohne SPI-Core:** Bit 4 des Steuerworts schaltet Takt und Daten auf die Bits 5 und 6 um
+  (`rtl/oled_mux.v`); so lässt sich die Anzeige mit `devmem` Bit für Bit ansteuern.
+- **D/C** darf erst wechseln, wenn die Bytes davor auf der Leitung waren: der SPI-Core liefert zu jedem
+  gesendeten Byte eines zurück, das Programm wartet darauf.
+- **Zeichensatz:** Terminus fett, 8 × 16 Pixel, Zeichen `0x20` bis `0x7E`; neu erzeugen mit
+  `target/gen_oled_font.py > target/oled_font.h`.
+- **`irq_test -d`:** für die Ausgabe hält das Programm die Messung kurz an (`enable = 0`), damit kein Interrupt
+  in die Ausgabe fällt und zu lang gemessen wird.
+- **Stand:** auf dem Board geprüft: Text mit `oled` lesbar und richtig herum; im SPI-Core gehen dabei alle Bytes
+  ohne Moduskonflikt raus. Die Laufzeiten von `irq_test` mit und ohne `-d` unterscheiden sich nicht.
+- Ein stehendes Bild brennt sich bei OLED mit der Zeit ein: nicht tagelang denselben Text zeigen, `oled aus`.
+
 ## HackRF an USB
 
 Das HackRF hängt an der USB-OTG-Buchse J13 des ZedBoards, Linux empfängt die I/Q-Daten über `libhackrf`.
@@ -490,6 +611,14 @@ USB-Strecke des Zynq und nicht der Prozessor. Sicher nutzbar sind Abtastraten bi
 | `set_scope.sh`: „AXI-GPIO des Oszilloskops nicht im Device Tree" | Auf dem Board läuft noch ein Bitstream ohne `iq_scope`: `./board.sh deploy` |
 | Oszilloskop: Fenster bleibt schwarz        | `helligkeit` zu groß oder `schritt` zu klein; mit `set_scope.sh kreis helligkeit=0` muss ein weißer Kreis erscheinen |
 | Oszilloskop: alles weiß oder Fläche statt Linie | `helligkeit` vergrößern oder `nachleuchten` verkleinern |
+| `irq_test`/`devmem`: „Bus error", in `dmesg` steht `external abort` | Device Tree mit `irq_timer`, aber Bitstream ohne: `BOOT.BIN` enthielt einen alten Bitstream. `build_petalinux.sh` nimmt ihn deshalb direkt aus der XSA |
+| `irq_test`: „Knoten irq_timer@... nicht im Device Tree" | Auf dem Board läuft noch ein Bitstream ohne `irq_timer`: `./board.sh deploy` |
+| `irq_test`: „kein UIO-Geraet"              | `rmmod uio_pdrv_genirq; modprobe uio_pdrv_genirq of_id=generic-uio` von Hand, dann `ls /sys/class/uio`. Das Modul liegt im Rootfs unter `/lib/modules`; fehlt es, die Karte neu schreiben. `cat /proc/device-tree/*/irq_timer@*/compatible` muss `generic-uio` zeigen |
+| `irq_test`: „kein Interrupt angekommen"    | `grep irq_timer /proc/interrupts`: steht der Zähler, kommt der IRQ nicht im PS an (`IRQ_F2P` in `create_hw.tcl`) |
+| `oled`: „Cores der OLED-Anzeige nicht im Device Tree" | Auf dem Board läuft noch ein Bitstream ohne OLED: `./board.sh deploy` |
+| `oled`: „der SPI-Core sendet nicht"        | `devmem 0x44A00064` (Statusregister): Bit 4 gesetzt heißt Moduskonflikt (`ss_i` nicht auf 1). Belegt der Kernel-Treiber den Core? `status` des Knotens muss `disabled` sein |
+| OLED bleibt dunkel, `oled` meldet keinen Fehler | `devmem 0x40060000` muss `0x2` oder `0x3` zeigen (beide Versorgungen ein). Wurde die Befehlsfolge in `target/oled.h` geändert? `A8 1F` (32 Zeilen) macht die Anzeige auf diesem Board dunkel |
+| OLED: Text steht auf dem Kopf oder ist gespiegelt | `oled -u` bzw. `irq_test -u` |
 | `codec_init.sh`: „Codec antwortet nicht"  | Bitstream geladen (ohne MCLK reagiert der Codec nicht)? `i2cdetect -y <bus>` muss `38` zeigen |
 
 ## Hinweis zu PetaLinux-Versionen

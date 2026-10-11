@@ -14,6 +14,8 @@
 #           + I/Q-Oszilloskop als Einblendung im Videostrom (Bildspeicher im Block-RAM)
 #           + I/Q-Ringpuffer im DDR, vom Core iq_reader ueber den HP1-Port gelesen
 #           + Spektrum der I/Q-Daten (FFT, Mittelung, Max-Hold), als Kurve im Oszilloskop
+#           + Messung der Interrupt-Laufzeit: irq_timer setzt den IRQ, Linux setzt ihn zurueck
+#           + OLED-Anzeige (SSD1306) ueber AXI Quad SPI und ein AXI-GPIO
 # =============================================================================
 
 set proj_name zedboard_hw
@@ -66,8 +68,10 @@ foreach core {sine_gen pattern_gen iq_reader iq_spectrum} {
 set_property ip_repo_paths $hls_ips [current_project]
 update_ip_catalog
 add_files -norecurse [list [file normalize ./rtl/i2s_tx.v] [file normalize ./rtl/clk_fwd.v] \
-    [file normalize ./rtl/iq_scope.v] [file normalize ./rtl/iq_palette.v] [file normalize ./rtl/spec_trace.v]]
-add_files -fileset constrs_1 -norecurse [list [file normalize ./constraints/audio.xdc] [file normalize ./constraints/hdmi.xdc]]
+    [file normalize ./rtl/iq_scope.v] [file normalize ./rtl/iq_palette.v] [file normalize ./rtl/spec_trace.v] \
+    [file normalize ./rtl/irq_timer.v] [file normalize ./rtl/oled_mux.v]]
+add_files -fileset constrs_1 -norecurse [list [file normalize ./constraints/audio.xdc] [file normalize ./constraints/hdmi.xdc] \
+    [file normalize ./constraints/oled.xdc]]
 update_compile_order -fileset sources_1
 
 # --- Block Design -----------------------------------------------------------
@@ -330,6 +334,64 @@ foreach {port pin} {hd_de vid_active_video hd_hsync vid_hsync hd_vsync vid_vsync
     create_bd_port -dir O $port
     connect_bd_net [get_bd_pins video_out/$pin] [get_bd_ports $port]
 }
+
+# --- Interrupt-Laufzeit: irq_timer (Verilog) setzt den IRQ, Linux quittiert ueber AXI-Lite ---
+#   Laeuft an FCLK0 (100 MHz, 10 ns Aufloesung), also ohne Taktuebergang zwischen dem
+#   Schreibzugriff und der Zeitmessung. Der IRQ geht an IRQ_F2P[0] des PS (SPI 61).
+#   Register siehe rtl/irq_timer.v
+set_property -dict [list CONFIG.PCW_USE_FABRIC_INTERRUPT {1} CONFIG.PCW_IRQ_F2P_INTR {1}] [get_bd_cells ps7]
+create_bd_cell -type module -reference irq_timer irq_timer
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins irq_timer/s_axi]
+if {[get_bd_nets -of_objects [get_bd_pins irq_timer/aclk]] ne [get_bd_nets -of_objects $fclk]} {
+    error "irq_timer laeuft nicht an FCLK0"
+}
+connect_bd_net [get_bd_pins irq_timer/irq] [get_bd_pins ps7/IRQ_F2P]
+
+# --- OLED-Anzeige (128 x 32, SSD1306): AXI Quad SPI + AXI-GPIO ---------------------
+#   Der SPI-Core liefert nur Takt und Daten (Teiler 16 x 2: 100 MHz / 32 = 3,125 MHz, FIFO mit
+#   256 Byte); die Anzeige hat keinen Chip Select und sendet nichts zurueck.
+#   Das AXI-GPIO steuert die vier uebrigen Leitungen: Bit 0 D/C, 1 RES, 2 VBAT, 3 VDD
+#   (RES, VBAT und VDD sind bei 0 aktiv; nach dem Reset ist alles aus). Mit Bit 4 kommen
+#   Takt und Daten zur Fehlersuche aus Bit 5 und 6 statt vom SPI-Core.
+#   Bedient werden beide von Linux aus ueber /dev/mem, siehe target/oled.h
+create_bd_cell -type ip -vlnv [latest_ip axi_quad_spi] oled_spi
+set_property -dict [list \
+    CONFIG.C_USE_STARTUP {0} \
+    CONFIG.C_NUM_SS_BITS {1} \
+    CONFIG.C_SCK_RATIO {16} \
+    CONFIG.Multiples16 {2} \
+    CONFIG.C_FIFO_DEPTH {256}] [get_bd_cells oled_spi]
+connect_bd_net $fclk [get_bd_pins oled_spi/ext_spi_clk]
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins oled_spi/AXI_LITE]
+if {[get_bd_nets -of_objects [get_bd_pins oled_spi/s_axi_aclk]] ne [get_bd_nets -of_objects $fclk]} {
+    error "oled_spi laeuft nicht an FCLK0"
+}
+# Eingang fuer einen zweiten Master: fest auf 1, sonst meldet der Core einen Moduskonflikt
+create_bd_cell -type ip -vlnv [latest_ip xlconstant] oled_ss_const
+set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}] [get_bd_cells oled_ss_const]
+connect_bd_net [get_bd_pins oled_ss_const/dout] [get_bd_pins oled_spi/ss_i]
+create_bd_cell -type ip -vlnv [latest_ip axi_gpio] oled_ctrl
+set_property -dict [list CONFIG.C_GPIO_WIDTH {7} CONFIG.C_ALL_OUTPUTS {1} CONFIG.C_DOUT_DEFAULT {0x0000000E}] \
+    [get_bd_cells oled_ctrl]
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config {Master "/ps7/M_AXI_GP0" Clk "Auto"} \
+    [get_bd_intf_pins oled_ctrl/S_AXI]
+
+# Bits 4..6 des Steuerworts: Takt und Daten von Hand statt vom SPI-Core (rtl/oled_mux.v)
+create_bd_cell -type module -reference oled_mux oled_mux
+connect_bd_net [get_bd_pins oled_ctrl/gpio_io_o] [get_bd_pins oled_mux/ctrl]
+connect_bd_net [get_bd_pins oled_spi/sck_o] [get_bd_pins oled_mux/spi_sck]
+connect_bd_net [get_bd_pins oled_spi/io0_o] [get_bd_pins oled_mux/spi_sdo]
+create_bd_port -dir O oled_sclk
+create_bd_port -dir O oled_sdin
+create_bd_port -dir O -from 3 -to 0 oled_gpio
+connect_bd_net [get_bd_pins oled_mux/oled_sclk] [get_bd_ports oled_sclk]
+connect_bd_net [get_bd_pins oled_mux/oled_sdin] [get_bd_ports oled_sdin]
+connect_bd_net [get_bd_pins oled_mux/oled_gpio] [get_bd_ports oled_gpio]
 
 assign_bd_address
 validate_bd_design

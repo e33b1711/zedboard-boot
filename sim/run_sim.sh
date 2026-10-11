@@ -3,6 +3,7 @@
 #   ./run_sim.sh             rtl/i2s_tx.v
 #   ./run_sim.sh iq_scope    rtl/iq_scope.v (I/Q-Oszilloskop), schreibt work/bild_*.txt
 #   ./run_sim.sh spec_trace  rtl/spec_trace.v (Spektrum als Kurve)
+#   ./run_sim.sh irq_timer   rtl/irq_timer.v (Laufzeit eines Interrupts)
 set -euo pipefail
 cd "$(dirname "$0")"
 # xelab linkt mit dem System-ld; ohne diesen Pfad findet er crt1.o nicht (Mint/Ubuntu)
@@ -21,5 +22,9 @@ spec_trace)
     xvlog ../../rtl/spec_trace.v ../spec_trace_tb.v
     xelab spec_trace_tb -s spec_trace_sim
     xsim spec_trace_sim -runall ;;
-*)  echo "Aufruf: $0 [i2s_tx|iq_scope|spec_trace]" >&2; exit 1 ;;
+irq_timer)
+    xvlog ../../rtl/irq_timer.v ../irq_timer_tb.v
+    xelab irq_timer_tb -s irq_timer_sim
+    xsim irq_timer_sim -runall ;;
+*)  echo "Aufruf: $0 [i2s_tx|iq_scope|spec_trace|irq_timer]" >&2; exit 1 ;;
 esac

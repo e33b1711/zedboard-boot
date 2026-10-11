@@ -69,7 +69,7 @@ sed -i -E '/^(# )?CONFIG_zed-tone[= ]/d' "$ROOTFS_CFG"
 
 mkdir -p "$APP_DIR/files"
 cp "$SCRIPT_DIR/target/zed-tools.bb" "$APP_DIR/"
-cp "$SCRIPT_DIR"/target/*.sh "$SCRIPT_DIR"/target/*.c "$APP_DIR/files/"
+cp "$SCRIPT_DIR"/target/*.sh "$SCRIPT_DIR"/target/*.c "$SCRIPT_DIR"/target/*.h "$SCRIPT_DIR"/target/uio.conf "$APP_DIR/files/"
 # libhackrf und die HackRF-Werkzeuge; kommen als Abhaengigkeit von zed-tools ins Rootfs
 mkdir -p project-spec/meta-user/recipes-apps/hackrf
 cp "$SCRIPT_DIR/target/hackrf.bb" project-spec/meta-user/recipes-apps/hackrf/
@@ -101,6 +101,11 @@ petalinux-build
 
 # --- BOOT.BIN packen --------------------------------------------------------
 IMG=images/linux
+# Bitstream direkt aus der XSA nehmen: petalinux-build erneuert images/linux/system.bit nicht
+# in jedem Fall (beobachtet nach einem einzelnen "petalinux-build -c device-tree"), dann
+# passen Bitstream und Device Tree in BOOT.BIN nicht zusammen.
+unzip -p "$XSA" "$(unzip -Z1 "$XSA" '*.bit' | head -n 1)" > "$IMG/system.bit.neu"
+mv "$IMG/system.bit.neu" "$IMG/system.bit"
 petalinux-package boot --fsbl "$IMG/zynq_fsbl.elf" --fpga "$IMG/system.bit" --u-boot --force \
   || petalinux-package --boot --fsbl "$IMG/zynq_fsbl.elf" --fpga "$IMG/system.bit" --u-boot --force
 

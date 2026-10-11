@@ -42,6 +42,24 @@
 	};
 };
 
+/*
+ * Messung der Interrupt-Laufzeit (rtl/irq_timer.v): der Knoten kommt mit Adresse und
+ * Interrupt aus der Hardware-Beschreibung. Mit diesem Namen uebernimmt ihn der Treiber
+ * uio_pdrv_genirq (modprobe uio_pdrv_genirq of_id=generic-uio), irq_test bedient ihn
+ * dann ueber /dev/uioN.
+ */
+&irq_timer {
+	compatible = "generic-uio";
+};
+
+/*
+ * OLED-Anzeige: den SPI-Core bedienen oled und irq_test selbst ueber /dev/mem (target/oled.h),
+ * der Kernel-Treiber soll ihn nicht belegen.
+ */
+&oled_spi {
+	status = "disabled";
+};
+
 /* Ethernet: Marvell 88E1518 PHY auf MDIO-Adresse 0 */
 &gem0 {
 	phy-handle = <&ethernet_phy>;

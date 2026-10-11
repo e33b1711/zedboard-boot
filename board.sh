@@ -53,14 +53,16 @@ find_board() {
 on_board() { ssh "${SSH_OPTS[@]}" "root@$HOST" "$@"; }
 
 # Werkzeuge aus dem gebauten Rootfs nach /usr/bin, dazu die HackRF-Werkzeuge mit ihren
-# Bibliotheken nach /usr/lib und /lib (fehlen in Images von vor dem HackRF-Stand)
+# Bibliotheken nach /usr/lib und /lib (fehlen in Images von vor dem HackRF-Stand) und
+# die Treiber-Einstellung fuer irq_test nach /etc/modprobe.d
 deploy_tools() {
-    local names=(fb_test iq_rx 'hackrf_*') f
+    local names=(fb_test iq_rx irq_test oled 'hackrf_*') f
     for f in "$DIR"/target/*.sh; do names+=("$(basename "$f")"); done
     local libs=('usr/lib/libhackrf.so*' 'usr/lib/libfftw3f.so*' 'lib/libusb-1.0.so*' 'lib/libudev.so*')
     local tmp; tmp="$(mktemp -d)"
-    tar -xzf "$IMG/rootfs.tar.gz" -C "$tmp" --wildcards "${names[@]/#/./usr/bin/}" "${libs[@]/#/./}"
-    tar -C "$tmp" --owner=0 --group=0 -cf - ./usr ./lib | on_board 'tar -C / -xf -'
+    tar -xzf "$IMG/rootfs.tar.gz" -C "$tmp" --wildcards "${names[@]/#/./usr/bin/}" "${libs[@]/#/./}" \
+        ./etc/modprobe.d/uio.conf
+    tar -C "$tmp" --owner=0 --group=0 -cf - ./usr ./lib ./etc/modprobe.d/uio.conf | on_board 'tar -C / -xf -'
     echo "Werkzeuge uebertragen: $(ls "$tmp/usr/bin" | tr '\n' ' ')"
     echo "Bibliotheken uebertragen: $(ls "$tmp/usr/lib" "$tmp/lib" | grep '\.so' | tr '\n' ' ')"
     rm -rf "$tmp"

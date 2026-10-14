@@ -56,7 +56,7 @@ on_board() { ssh "${SSH_OPTS[@]}" "root@$HOST" "$@"; }
 # Bibliotheken nach /usr/lib und /lib (fehlen in Images von vor dem HackRF-Stand) und
 # die Treiber-Einstellung fuer irq_test nach /etc/modprobe.d
 deploy_tools() {
-    local names=(fb_test iq_rx irq_test oled 'hackrf_*') f
+    local names=(fb_test iq_rx irq_test oled vec_demo 'hackrf_*') f
     for f in "$DIR"/target/*.sh; do names+=("$(basename "$f")"); done
     local libs=('usr/lib/libhackrf.so*' 'usr/lib/libfftw3f.so*' 'lib/libusb-1.0.so*' 'lib/libudev.so*')
     local tmp; tmp="$(mktemp -d)"

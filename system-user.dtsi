@@ -53,6 +53,18 @@
 };
 
 /*
+ * Testbild-Generator (hls/pattern_gen.cpp): als UIO-Geraet mit dem Puls am Bildanfang
+ * (IRQ_F2P[1] = SPI 62, steigende Flanke), damit vec_demo die Linientabelle bildgenau
+ * nachfuehren kann. Der Interrupt steht nicht in der Hardware-Beschreibung, weil der
+ * HLS-Ausgang frame_irq dort kein Interrupt-Anschluss ist.
+ */
+&pattern_gen {
+	compatible = "generic-uio";
+	interrupt-parent = <&intc>;
+	interrupts = <0 30 1>;
+};
+
+/*
  * OLED-Anzeige: den SPI-Core bedienen oled und irq_test selbst ueber /dev/mem (target/oled.h),
  * der Kernel-Treiber soll ihn nicht belegen.
  */

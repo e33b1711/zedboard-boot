@@ -4,6 +4,7 @@ Getestet mit Vivado 2025.2 und PetaLinux 2025.2 auf Linux Mint 22.3 (Ubuntu-24.0
 Board bootet von SD bis zum Login, Ethernet funktioniert, Sinuston auf Line Out ist hörbar,
 HDMI-Testbilder in 1080p60 auf dem Monitor geprüft (Farben korrekt mit `format 0`, Farbverlauf ohne Pixelfehler).
 Die Framebuffer-Ausgabe (Testbild 7, `fb_test`) ist auf dem Monitor geprüft: ruhiges Bild, die drei Puffer wechseln sauber.
+Die Linien (Testbild 8) sind auf dem Monitor geprüft, als festes Bild und bildgenau bewegt von `vec_demo`.
 
 ## Boot-Kette
 
@@ -19,7 +20,9 @@ BootROM ──► FSBL ──► Bitstream (PL) ──► U-Boot ──► boot.
 
 | Datei               | Zweck                                                        |
 |---------------------|--------------------------------------------------------------|
-| `build_hls.tcl`     | Vitis HLS: `hls/sine_gen.cpp` (Sinus), `hls/pattern_gen.cpp` (HDMI-Testbild, Framebuffer-Leser), `hls/iq_reader.cpp` (Leser für den I/Q-Ringpuffer) und `hls/iq_spectrum.cpp` (FFT, Mittelung, Max-Hold) → C-Simulation, Synthese, Vivado-IP |
+| `build_hls.tcl`     | Vitis HLS: `hls/sine_gen.cpp` (Sinus), `hls/pattern_gen.cpp` (HDMI-Testbild, Framebuffer-Leser, Linien), `hls/iq_reader.cpp` (Leser für den I/Q-Ringpuffer) und `hls/iq_spectrum.cpp` (FFT, Mittelung, Max-Hold) → C-Simulation, Synthese, Vivado-IP |
+| `hls/gen_lines.py`  | erzeugt das feste Linienbild für Testbild 8 (`hls/lines_rom.h`) |
+| `target/lines.h`    | Eintrag der Linientabelle aus Endpunkten rechnen und am Bildrand beschneiden (von `vec_demo` und der Testbench von `pattern_gen` benutzt) |
 | `cosim_hls.tcl`     | RTL-Co-Simulation von `pattern_gen` (kleines Bild) und `iq_reader`; prüft die Leser am AXI-Master |
 | `create_hw.tcl`     | Vivado-Projekt: PS7 mit ZedBoard-Preset, AXI-GPIO (LEDs), Sinuston- und HDMI-Kette, Framebuffer-Anbindung, Bitstream, `system.xsa` |
 | `rtl/i2s_tx.v`      | I2S-Sender (Verilog) für den Audio-Codec; Testbench in `sim/` |
@@ -28,10 +31,11 @@ BootROM ──► FSBL ──► Bitstream (PL) ──► U-Boot ──► boot.
 | `rtl/spec_trace.v`  | zeichnet das Spektrum als Kurve in das Oszilloskop; Testbench in `sim/` |
 | `rtl/irq_timer.v`   | misst die Laufzeit eines Interrupts von der PL bis zur Antwort von Linux (AXI-Lite, Statistik in der PL); Testbench in `sim/` |
 | `rtl/oled_mux.v`    | Leitungen der OLED-Anzeige: Takt und Daten vom SPI-Core oder zur Fehlersuche von Hand aus dem Steuerwort |
+| `rtl/frame_irq.v`   | macht aus jedem Pegelwechsel von `frame_tick` (`pattern_gen`, einmal pro Bild) einen Interrupt-Puls für `IRQ_F2P[1]` |
 | `rtl/gen_palette.py`| erzeugt die Farbtabellen des Oszilloskops (`rtl/iq_palette.v`) |
 | `constraints/audio.xdc`, `hdmi.xdc`, `oled.xdc` | Pins des Audio-Codecs ADAU1761, des HDMI-Senders ADV7511 und der OLED-Anzeige |
 | `build_petalinux.sh`| PetaLinux-Projekt aus XSA, ext4-Rootfs auf SD, Build, `BOOT.BIN`, `.wic` |
-| `target/`           | Werkzeuge fürs Board (`codec_init.sh`, `set_freq.sh`, `hdmi_init.sh`, `set_pattern.sh`, `set_scope.sh`, `fb_test.c`, `iq_rx.c`, `irq_test.c`, `oled.c`) und ihr Rezept; landen in `/usr/bin` |
+| `target/`           | Werkzeuge fürs Board (`codec_init.sh`, `set_freq.sh`, `hdmi_init.sh`, `set_pattern.sh`, `set_scope.sh`, `fb_test.c`, `iq_rx.c`, `irq_test.c`, `oled.c`, `vec_demo.c`) und ihr Rezept; landen in `/usr/bin` |
 | `target/oled.h`, `oled_font.h` | Ansteuerung der OLED-Anzeige (von `oled.c` und `irq_test.c` eingebunden) und ihr Zeichensatz, erzeugt von `target/gen_oled_font.py` |
 | `target/hackrf.bb`  | Rezept für `libhackrf` und die HackRF-Werkzeuge (`hackrf_info`, `hackrf_transfer`, `hackrf_debug`, …) |
 | `system-user.dtsi`  | Device-Tree-Ergänzungen (Konsole, Ethernet-PHY, SD, reservierter Speicher für die Framebuffer und den I/Q-Ringpuffer, `irq_timer` als UIO-Gerät, SPI-Core der OLED-Anzeige abgeschaltet) |
@@ -156,7 +160,7 @@ Zum Vergleich mit dem Schaltplan: ZedBoard Hardware User's Guide, Abschnitt „C
 | LEDs LD0–LD7      | AXI-GPIO `leds` auf `0x41200000`, 8 Bit, nur Ausgang |
 | Sinus-Generator   | HLS-Core `sine_gen` auf `0x40000000`, Register `phase_inc` bei Offset `0x10` |
 | Audio-Codec ADAU1761 | I2S aus `i2s_tx`, I2C über PS-I2C0 (EMIO), Adresse `0x38` |
-| Testbild-Generator | HLS-Core `pattern_gen` auf `0x40010000`, Register `pattern` `0x10`, `color` `0x18`, `format` `0x20`, `fb_addr0..2` `0x28`/`0x30`/`0x38`, `fb_frames` `0x40` |
+| Testbild-Generator | HLS-Core `pattern_gen` auf `0x40010000`, Register `pattern` `0x10`, `color` `0x18`, `format` `0x20`, `fb_addr0..2` `0x28`/`0x30`/`0x38`, `fb_frames` `0x40`, `lines_ctrl` `0x48`, `lines_cur` `0x50`, `frames` `0x60`, Linientabelle ab `0x400`; Puls am Bildanfang an `IRQ_F2P[1]` (SPI 62, `<0 30 1>`), als UIO-Gerät |
 | Framebuffer       | 3 × 4 MiB im DDR auf `0x1E000000`, `0x1E400000`, `0x1E800000`; der Core liest sie über den HP0-Port des PS |
 | I/Q-Ringpuffer    | 16 MiB im DDR auf `0x1F000000`; HLS-Core `iq_reader` liest ihn über den HP1-Port des PS und speist das Oszilloskop. Register: `enable` `0x10`, `ring_addr` `0x18`, `ring_bytes` `0x20`, `wr_ptr` `0x28`, `rd_ptr` `0x30`, `samples` `0x40`, `seq_errors` `0x50` |
 | Spektrum          | HLS-Core `iq_spectrum` (FFT 1024, Blockmittelung, Max-Hold) bekommt dieselben I/Q-Daten; Register `avg_log2` `0x10`, `maxhold` `0x18`, `spectra` `0x20`, `overflows` `0x30`. `spec_trace` gibt das Ergebnis als Kurve an das Oszilloskop |
@@ -234,6 +238,7 @@ Clocking Wizard: 100 MHz ──► 148,5 MHz Pixeltakt
 | 5 | weißes Quadrat, das über dunkelblauen Hintergrund wandert |
 | 6 | Farbverlauf (rot horizontal, grün vertikal, blau diagonal), der mit der Zeit wandert |
 | 7 | Framebuffer 0, 1, 2 im Wechsel (siehe unten) |
+| 8 | 32 Linien, grün auf schwarz (siehe unten) |
 
 Auf dem Board (als root):
 
@@ -255,6 +260,74 @@ Zur Fehlersuche an der Datenstrecke lässt sich die Byte-Reihenfolge ohne Neubau
 
 Die C-Simulation schreibt alle Testbilder als `pattern<n>.ppm` nach
 `hls/proj_pattern_gen/solution1/csim/build/`.
+
+### Linien (Testbild 8)
+
+Der Core zeichnet bis zu 32 Linien direkt im Pixeltakt, ohne Bildspeicher. Die Linien kommen
+entweder aus dem festen Bild (Rahmen, Raute und ein Stern mit 24 Strahlen aus `hls/lines_rom.h`,
+erzeugt von `hls/gen_lines.py`; auf dem Monitor geprüft) oder bildgenau von einer Anwendung
+(`vec_demo`, siehe unten).
+
+- Der Core dividiert nicht. Wer die Linien liefert, rechnet aus den Endpunkten die Steigung;
+  der Core addiert sie nur noch Zeile für Zeile auf.
+- Ein Eintrag der Tabelle sind 2 Worte zu 64 Bit (16 Byte):
+
+  | Feld | Bits | Inhalt |
+  |------|------|--------|
+  | `x`     | Wort 0, 15:0  | Spalte, an der die Linie in Zeile `y0` beginnt; läuft die Linie nach links, die rechte Kante des Startpixels (Spalte + 1) |
+  | `y0`    | Wort 0, 31:16 | erste Zeile |
+  | `y1`    | Wort 0, 47:32 | letzte Zeile (≥ `y0`) |
+  | `flags` | Wort 0, 63:48 | Bit 0 gültig, Bit 1 flache Linie (\|dx\| > dy) |
+  | `slope` | Wort 1, 31:0  | Schritt in x pro Zeile mit Vorzeichen, 16 Nachkommabits: ±(\|dx\| + 1) / (`y1` − `y0` + 1), zur Null hin abgerundet |
+
+- In Zeile `y0 + k` belegt die Linie die Spalten von `x + k·slope` bis `x + (k+1)·slope`.
+  Die Abschnitte aller 32 Linien rechnet der Core in den ersten Takten der Zeile davor,
+  im Bild vergleicht er nur noch die Spalte mit 32 Abschnitten.
+- Gezeichnet wird in Pixelpaaren, die Linien sind also 2 Pixel breit: bei 4:2:2 teilen sich zwei
+  Pixel die Farbe, ein einzelnes grünes Pixel wäre je nach Spalte grün oder grau.
+  Flache Linien werden zwei Zeilen hoch gezeichnet (Bit 1), damit sie nicht dünner wirken als steile.
+- Die Pause am Bildanfang (Tabelle laden, Abschnitte der ersten Zeile) muss kurz bleiben, derzeit
+  rund 100 Takte: `iq_scope` hält die letzten Pixel eines Bildes fest, bis wieder Pixel kommen, und die
+  Videoausgabe hat nur 1024 Pixel FIFO. Eine Pause von einer ganzen Zeile (1920 Takte) reichte, damit
+  der Monitor „no signal" meldete, obwohl der ADV7511 1080p60 erkannte.
+- Anderes festes Bild: `picture()` in `hls/gen_lines.py` ändern, Skript starten, HLS und Hardware neu bauen.
+
+#### Linien von einer Anwendung
+
+```
+vec_demo ──AXI-Lite (Tabelle, lines_ctrl)──► pattern_gen ──► wie oben
+    ▲                                            │ frame_tick ──► frame_irq.v: Puls am Bildanfang
+    └── read auf /dev/uioN ◄── uio_pdrv_genirq ◄─┴── IRQ_F2P[1] (SPI 62, steigende Flanke)
+```
+
+- Die Tabelle liegt im Core (AXI-Lite-Speicher ab `0x400`): zwei Puffer zu je 32 Einträgen,
+  Puffer 1 ab `0x600`. Jedes 64-Bit-Wort liegt als zwei 32-Bit-Worte im Speicher, das untere zuerst.
+- `lines_ctrl` (`0x48`): Bit 0 = Linien aus der Tabelle statt aus dem festen Bild, Bit 1 = Puffer 1.
+  Der Core liest das Register am Anfang jedes Bildes und den gewählten Puffer in den ersten
+  64 Takten danach; ein Schreibzugriff auf `lines_ctrl` schaltet also bildgenau um.
+- Rückmeldung: `frames` (`0x60`) zählt die Bilder, `lines_cur` (`0x50`) zeigt die Einstellung, die
+  für das laufende Bild übernommen wurde. Bei der Übernahme wechselt der Ausgang `frame_tick` seinen
+  Pegel; `rtl/frame_irq.v` macht daraus einen Puls von 64 Takten (Interrupt). Das Bild wird danach noch fertig ausgegeben, sichtbar wird die Übernahme mit dem
+  nächsten Bild, etwa 0,7 ms später (Rest des Bildes und Austastlücke).
+- `vec_demo` wartet auf den Interrupt, rechnet die Linien für das nächste Bild (Steigung und
+  Beschneiden am Bildrand in `target/lines.h`), schreibt sie in den Puffer, der gerade nicht gewählt
+  ist, und wählt ihn. Dafür bleiben etwa 16 ms; gemessen braucht `vec_demo` dafür im Mittel 86 µs
+  (höchstens 92 µs), bei 600 Bildern kein Bild zu spät und kein Interrupt verloren. Kommt die Wahl zu spät, zeigt der Core das vorige
+  Bild noch einmal vollständig; `vec_demo` zählt das als „zu spät".
+- Die Bewegung hängt am Bildzähler des Cores: jedes Bild zeigt den Stand seiner Nummer.
+- Auf dem Monitor geprüft: der Würfel dreht sich flüssig, ohne Zerreißen.
+- `set_pattern.sh 8` schaltet auf das feste Bild zurück (`lines_ctrl = 0`).
+- Der Device-Tree-Knoten `pattern_gen` ist dafür ein UIO-Gerät mit Interrupt (`system-user.dtsi`);
+  `set_pattern.sh` greift weiter über `/dev/mem` zu.
+
+Auf dem Board (als root):
+
+```bash
+vec_demo                   # Würfel, Welle und Quadrat bewegen sich, bis Strg-C
+vec_demo -n 600 -r 80      # 600 Bilder mit Echtzeit-Priorität
+vec_demo -w 20             # Test: 20 ms Rechenzeit pro Bild, also jedes Bild zu spät
+set_pattern.sh 8           # zurück zum festen Bild
+```
 
 ## Framebuffer
 

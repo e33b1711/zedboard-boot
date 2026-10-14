@@ -2,9 +2,16 @@
 // und schreibt die Bilder als PPM (zurueckgewandelt nach RGB) ins Arbeitsverzeichnis.
 // Die Framebuffer liegen in einem Speichermodell; geprueft wird, dass sie in der
 // Reihenfolge 0, 1, 2 und unveraendert ausgegeben werden.
+// Das Linienbild wird Pixel fuer Pixel mit einem Modell verglichen und zusaetzlich
+// geometrisch gegen die Endpunkte geprueft, fuer das feste Bild und fuer Linien aus der
+// Tabelle (beide Puffer, Umschalten, Bildzaehler, Beschneiden am Bildrand).
 // Mit -DCOSIM (kleines Bild, siehe build_hls.tcl) laufen nur die Framebuffer-Tests.
 #include "pattern_gen.h"
+#include "lines_rom.h"
+#include "../target/lines.h"
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <vector>
 
@@ -29,11 +36,21 @@ static void fill_fb() {
         }
 }
 
+// Linientabelle im Core, Register lines_ctrl und die Rueckmeldungen des letzten Bildes
+static ap_uint<64> lines_mem[2 * LINE_BUF_WORDS];
+static int lines_ctrl = 0;
+static unsigned last_frames = 0, last_cur = 0;
+
 // Ein Aufruf des Cores = ein Bild
 static frame_t render(int pattern, unsigned color, int format = 0, int fb_frames = 0) {
     frame_t f; f.errors = 0;
     hls::stream<video_t> s;
-    pattern_gen(pattern, color, format, FB_ADDR[0], FB_ADDR[1], FB_ADDR[2], fb_frames, mem, s);
+    ap_uint<2> cur; ap_uint<32> frames; ap_uint<1> tick;
+    pattern_gen(pattern, color, format, FB_ADDR[0], FB_ADDR[1], FB_ADDR[2], fb_frames, mem,
+                lines_mem, lines_ctrl, cur, frames, tick, s);
+    if (frames != last_frames + 1) { std::printf("FEHLER: Bildzaehler %u nach %u\n", frames.to_uint(), last_frames); f.errors++; }
+    if (tick != (frames & 1)) { std::printf("FEHLER: frame_tick passt nicht zum Bildzaehler\n"); f.errors++; }
+    last_frames = frames; last_cur = cur;
     for (int yy = 0; yy < FRAME_HEIGHT; yy++) {
         for (int xx = 0; xx < FRAME_WIDTH; xx++) {
             video_t v = s.read();
@@ -128,6 +145,184 @@ static int expect(const frame_t &f, const char *what, int x, int y, int r, int g
     return ok ? 0 : 1;
 }
 
+// Modell: Pixel, die eine Tabelle aus LINE_COUNT Eintraegen gruen faerbt
+static std::vector<unsigned char> model_lines(const uint64_t *words) {
+    std::vector<unsigned char> want(FRAME_WIDTH * FRAME_HEIGHT, 0);
+    for (int n = 0; n < LINE_COUNT; n++) {
+        uint64_t w0 = words[2 * n], w1 = words[2 * n + 1];
+        if (!((w0 >> 48) & LINE_VALID)) continue;
+        // Abschnitt jeder Zeile direkt aus dem Eintrag: x + k * slope bis x + (k + 1) * slope
+        long long x0 = (long long)(w0 & 0xFFFF) << LINE_FRAC;
+        long long slope = (int32_t)(w1 & 0xFFFFFFFF), one = 1LL << LINE_FRAC;
+        int y0 = (w0 >> 16) & 0xFFFF, y1 = (w0 >> 32) & 0xFFFF;
+        bool flat = ((w0 >> 48) & LINE_FLAT) != 0;
+        for (int k = 0; k <= y1 - y0; k++) {
+            long long a = x0 + k * slope, b = a + slope;
+            long long lo = std::min(a, b) / one, hi = (std::max(a, b) + one - 1) / one;   // [lo, hi)
+            lo &= ~1LL; hi = (hi + 1) & ~1LL;                                             // Pixelpaare
+            for (int dy = 0; dy <= (flat ? 1 : 0); dy++) {
+                int y = y0 + k + dy;
+                if (y >= FRAME_HEIGHT) continue;
+                for (long long x = lo; x < hi && x < FRAME_WIDTH; x++) want[y * FRAME_WIDTH + x] = 1;
+            }
+        }
+    }
+    return want;
+}
+
+// Bild gegen Modell: gruen genau dort, wo das Modell es erwartet, sonst schwarz. Unabhaengig
+// vom Tabellenformat: jedes gruene Pixel liegt nah an einer der Strecken (pts, n Stueck).
+static int compare_lines(const frame_t &f, const std::vector<unsigned char> &want,
+                         const double (*pts)[4], int n, double tol, const char *what) {
+    int green = 0, wrong = 0, other = 0, far = 0;
+    for (int y = 0; y < FRAME_HEIGHT; y++)
+        for (int x = 0; x < FRAME_WIDTH; x++) {
+            int i = y * FRAME_WIDTH + x;
+            bool on = (f.y[i] == 173);
+            if (!on && f.y[i] != 16) other++;
+            if (on != (want[i] != 0)) wrong++;
+            if (!on) continue;
+            green++;
+            double best = 1e9;
+            for (int k = 0; k < n; k++) {
+                const double *p = pts[k];
+                double vx = p[2] - p[0], vy = p[3] - p[1], ux = x - p[0], uy = y - p[1];
+                double l2 = vx * vx + vy * vy, t = l2 > 0 ? (ux * vx + uy * vy) / l2 : 0;
+                t = t < 0 ? 0 : t > 1 ? 1 : t;
+                best = std::min(best, std::hypot(ux - t * vx, uy - t * vy));
+            }
+            if (best > tol) far++;
+        }
+    std::printf("%s: %d Pixel gruen, %d anders als das Modell, %d weiter als %.1f Pixel von einer Strecke, "
+                "%d in anderer Farbe\n", what, green, wrong, far, tol, other);
+    return (wrong || far || other) ? 1 : 0;
+}
+
+// Festes Linienbild: Tabelle gegen die Endpunkte, Bild gegen das Modell
+static int test_lines(const frame_t &f) {
+    int fail = 0;
+    uint64_t words[2 * LINE_COUNT];
+    double pts[LINE_COUNT][4];
+
+    for (int n = 0; n < LINE_COUNT; n++) {
+        const int *p = LINES_POINTS[n];
+        uint64_t w[2];
+        line_encode(p[0], p[1], p[2], p[3], w);
+        if (w[0] != LINES_ROM[2 * n] || w[1] != LINES_ROM[2 * n + 1]) {
+            std::printf("FEHLER Linie %d: Tabelle passt nicht zu den Endpunkten\n", n);
+            fail++;
+        }
+        words[2 * n] = LINES_ROM[2 * n].to_uint64();
+        words[2 * n + 1] = LINES_ROM[2 * n + 1].to_uint64();
+        for (int k = 0; k < 4; k++) pts[n][k] = p[k];
+    }
+    fail += compare_lines(f, model_lines(words), pts, LINE_COUNT, 2.5, "Linien (fest)");
+
+    // Jede Strecke ist durchgehend gezeichnet
+    for (int n = 0; n < LINE_COUNT; n++) {
+        const int *p = LINES_POINTS[n];
+        int gaps = 0;
+        for (int j = 0; j <= 2000; j++) {
+            int x = (int)std::lround(p[0] + (p[2] - p[0]) * j / 2000.0);
+            int y = (int)std::lround(p[1] + (p[3] - p[1]) * j / 2000.0);
+            // der Core zeichnet Pixelpaare und rundet anders als hier: ein Pixel Abstand ist erlaubt
+            bool on = false;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -2; dx <= 2; dx++) {
+                    int xx = x + dx, yy = y + dy;
+                    if (xx >= 0 && xx < FRAME_WIDTH && yy >= 0 && yy < FRAME_HEIGHT && f.y[yy * FRAME_WIDTH + xx] == 173) on = true;
+                }
+            if (!on) gaps++;
+        }
+        if (gaps) { std::printf("FEHLER Linie %d: %d Luecken\n", n, gaps); fail++; }
+    }
+
+    // Endpunkte und Mitte jeder Linie muessen gruen sein, die Bildecken schwarz
+    for (int n = 0; n < LINE_COUNT; n++) {
+        const int *p = LINES_POINTS[n];
+        fail += expect(f, "Linie Anfang", p[0], p[1], 0, 255, 0);
+        fail += expect(f, "Linie Ende",   p[2], p[3], 0, 255, 0);
+    }
+    fail += expect(f, "Stern waagerecht", FRAME_WIDTH / 2 + 250, FRAME_HEIGHT / 2, 0, 255, 0);
+    fail += expect(f, "Stern senkrecht",  FRAME_WIDTH / 2, FRAME_HEIGHT / 2 - 250, 0, 255, 0);
+    fail += expect(f, "Stern diagonal",   FRAME_WIDTH / 2 + 180, FRAME_HEIGHT / 2 + 180, 0, 255, 0);
+    fail += expect(f, "Ecke",             0, 0, 0, 0, 0);
+    fail += expect(f, "Ecke",             FRAME_WIDTH - 1, FRAME_HEIGHT - 1, 0, 0, 0);
+    fail += expect(f, "Sternmitte",       FRAME_WIDTH / 2, FRAME_HEIGHT / 2, 0, 0, 0);
+    return fail;
+}
+
+// Puffer buf der Tabelle mit Strecken fuellen (beschnitten wie in der Anwendung)
+static void fill_table(int buf, const double (*pts)[4], int n, uint64_t words[2 * LINE_COUNT]) {
+    for (int k = 0; k < LINE_COUNT; k++) {
+        uint64_t w[2] = {0, 0};
+        if (k < n) line_clip(pts[k][0], pts[k][1], pts[k][2], pts[k][3], w);
+        words[2 * k] = w[0]; words[2 * k + 1] = w[1];
+        lines_mem[buf * LINE_BUF_WORDS + 2 * k]     = w[0];
+        lines_mem[buf * LINE_BUF_WORDS + 2 * k + 1] = w[1];
+    }
+}
+
+// Linien aus der Tabelle: beide Puffer, Umschalten zwischen den Bildern, Beschneiden
+static int test_table(const frame_t &rom_frame) {
+    int fail = 0;
+    frame_t f;
+
+    // Puffer 1 = festes Bild -> gleiches Bild wie aus dem ROM
+    for (int j = 0; j < 2 * LINE_COUNT; j++) lines_mem[LINE_BUF_WORDS + j] = LINES_ROM[j];
+    // Puffer 0: wenige Linien, teils ueber den Rand, eine ganz ausserhalb
+    static const double few[5][4] = {
+        {-300, 100, 500, 900},          // links abgeschnitten
+        {1500, -50, 2100, 700},         // oben und rechts abgeschnitten
+        {100, 1000, 1800, 1200},        // flach, unten abgeschnitten
+        {-100, -100, -10, 500},         // ganz ausserhalb
+        {960, 540, 960, 540},           // ein einzelner Punkt
+    };
+    uint64_t words[2 * LINE_COUNT];
+    fill_table(0, few, 5, words);
+    if (words[6] != 0 || words[7] != 0) { std::printf("FEHLER: Linie ausserhalb nicht leer\n"); fail++; }
+
+    lines_ctrl = LINES_CTRL_TABLE | LINES_CTRL_BUF1;
+    f = render(PATTERN_LINES, 0);
+    fail += f.errors;
+    if (last_cur != (unsigned)lines_ctrl) { std::printf("FEHLER: lines_cur %u statt %d\n", last_cur, lines_ctrl); fail++; }
+    if (f.y != rom_frame.y || f.c != rom_frame.c) { std::printf("FEHLER: Puffer 1 mit festem Bild sieht anders aus\n"); fail++; }
+
+    lines_ctrl = LINES_CTRL_TABLE;
+    f = render(PATTERN_LINES, 0);
+    fail += f.errors;
+    if (last_cur != (unsigned)lines_ctrl) { std::printf("FEHLER: lines_cur %u statt %d\n", last_cur, lines_ctrl); fail++; }
+    fail += compare_lines(f, model_lines(words), few, 5, 3.0, "Linien (Tabelle, Rand)");
+    write_ppm(f, "pattern8_table.ppm");
+    fail += expect(f, "Rand links",  0, 400, 0, 255, 0);               // (-300,100)-(500,900) trifft x=0 bei y=400
+    fail += expect(f, "Rand unten",  772, FRAME_HEIGHT - 1, 0, 255, 0); // (100,1000)-(1800,1200) trifft y=1079 bei x=772
+    fail += expect(f, "Punkt",       960, 540, 0, 255, 0);
+    fail += expect(f, "leer",        1000, 300, 0, 0, 0);
+
+    // Zufaellige Linien ueber den ganzen Bereich und darueber hinaus
+    double rnd[LINE_COUNT][4];
+    unsigned seed = 12345;
+    for (int k = 0; k < LINE_COUNT; k++)
+        for (int c = 0; c < 4; c++) {
+            seed = seed * 1103515245u + 12345u;
+            double v = (seed >> 8) % 10000 / 10000.0;
+            rnd[k][c] = (c % 2 == 0) ? v * 2400 - 240 : v * 1400 - 160;
+        }
+    fill_table(1, rnd, LINE_COUNT, words);
+    lines_ctrl = LINES_CTRL_TABLE | LINES_CTRL_BUF1;
+    f = render(PATTERN_LINES, 0);
+    fail += f.errors;
+    fail += compare_lines(f, model_lines(words), rnd, LINE_COUNT, 3.0, "Linien (Tabelle, zufaellig)");
+    write_ppm(f, "pattern8_random.ppm");
+
+    // Zurueck zum festen Bild
+    lines_ctrl = 0;
+    f = render(PATTERN_LINES, 0);
+    fail += f.errors;
+    if (f.y != rom_frame.y) { std::printf("FEHLER: festes Bild nach der Tabelle anders\n"); fail++; }
+    return fail;
+}
+
 int main() {
     int fail = 0;
     frame_t f;
@@ -207,6 +402,16 @@ int main() {
     fail += g.errors;
     if (f.y == g.y) { std::printf("FEHLER: Farbverlauf aendert sich nicht\n"); fail++; }
     write_ppm(g, "pattern6_later.ppm");
+
+    // Linien: zwei Bilder nacheinander muessen gleich sein (die Tabelle wird je Bild neu geladen)
+    f = render(PATTERN_LINES, 0);
+    fail += f.errors;
+    fail += test_lines(f);
+    write_ppm(f, "pattern8.ppm");
+    g = render(PATTERN_LINES, 0);
+    fail += g.errors;
+    if (f.y != g.y || f.c != g.c) { std::printf("FEHLER: Linienbild aendert sich\n"); fail++; }
+    fail += test_table(f);
 
     // Format-Bits: Y/C getauscht -> Y steht im oberen Byte
     f = render(PATTERN_BARS, 0, FORMAT_SWAP_YC);

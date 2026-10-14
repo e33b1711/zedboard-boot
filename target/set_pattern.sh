@@ -10,19 +10,21 @@
 #
 #  Testbilder: 0 schwarz, 1 Farbbalken, 2 Graukeil, 3 Schachbrett,
 #              4 Vollflaeche, 5 bewegtes Quadrat, 6 wandernder Farbverlauf,
-#              7 Framebuffer (vorher mit fb_test fuellen)
-#  Register:   pattern 0x10, color 0x18, format 0x20, fb_frames 0x40
+#              7 Framebuffer (vorher mit fb_test fuellen),
+#              8 Linien (32 Linien, gruen auf schwarz; hier immer das feste Bild,
+#                bewegte Linien liefert vec_demo)
+#  Register:   pattern 0x10, color 0x18, format 0x20, fb_frames 0x40, lines_ctrl 0x48
 # =============================================================================
 set -e
 
-NAMES="schwarz Farbbalken Graukeil Schachbrett Vollflaeche Quadrat Farbverlauf Framebuffer"
+NAMES="schwarz Farbbalken Graukeil Schachbrett Vollflaeche Quadrat Farbverlauf Framebuffer Linien"
 
 # Basisadresse aus dem Device Tree (Knoten pattern_gen@<adresse>), sonst Vorgabe
 NODE=$(find /proc/device-tree/ -maxdepth 2 -name 'pattern_gen@*' 2>/dev/null | head -n 1)
 if [ -n "$NODE" ]; then BASE=0x${NODE##*@}; else BASE=0x40010000; fi
 reg() { printf '0x%08X' $((BASE + $1)); }
 
-usage() { sed -n '3,15p' "$0" | sed 's/^# \{0,2\}//' >&2; exit 1; }
+usage() { sed -n '3,16p' "$0" | sed 's/^# \{0,2\}//' >&2; exit 1; }
 
 if [ $# -eq 0 ]; then
     P=$(($(devmem "$(reg 0x10)" 32) & 0xFF))
@@ -41,7 +43,7 @@ if [ "$1" = "format" ]; then
     exit 0
 fi
 
-case "$1" in [0-7]) ;; *) usage ;; esac
+case "$1" in [0-8]) ;; *) usage ;; esac
 if [ "$1" = 7 ]; then
     if [ -n "$2" ]; then
         echo "$2" | grep -Eq '^[0-9]{1,5}$' && [ "$2" -le 65535 ] || usage
@@ -51,6 +53,7 @@ if [ "$1" = 7 ]; then
     echo "Testbild 7 (Framebuffer)${2:+, Wechsel alle $2 Bilder}"
     exit 0
 fi
+[ "$1" = 8 ] && devmem "$(reg 0x48)" 32 0          # Linien aus dem festen Bild
 if [ -n "$2" ]; then
     echo "$2" | grep -Eq '^[0-9a-fA-F]{6}$' || usage
     devmem "$(reg 0x18)" 32 "0x$2"

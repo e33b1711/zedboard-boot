@@ -31,7 +31,7 @@ foreach {core period description} $cores {
     create_clock -period $period -name default
     config_interface -m_axi_addr64=false           ;# Speicheradressen sind 32 Bit breit
 
-    csim_design
+    csim_design -O                                 ;# optimiert uebersetzt, sonst laufen die Bildtests sehr lange
     csynth_design
     export_design -format ip_catalog -vendor user.org -library hls -version 1.0 \
         -description $description

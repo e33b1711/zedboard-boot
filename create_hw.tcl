@@ -69,7 +69,8 @@ set_property ip_repo_paths $hls_ips [current_project]
 update_ip_catalog
 add_files -norecurse [list [file normalize ./rtl/i2s_tx.v] [file normalize ./rtl/clk_fwd.v] \
     [file normalize ./rtl/iq_scope.v] [file normalize ./rtl/iq_palette.v] [file normalize ./rtl/spec_trace.v] \
-    [file normalize ./rtl/irq_timer.v] [file normalize ./rtl/oled_mux.v]]
+    [file normalize ./rtl/irq_timer.v] [file normalize ./rtl/oled_mux.v] \
+    [file normalize ./rtl/frame_irq.v]]
 add_files -fileset constrs_1 -norecurse [list [file normalize ./constraints/audio.xdc] [file normalize ./constraints/hdmi.xdc] \
     [file normalize ./constraints/oled.xdc]]
 update_compile_order -fileset sources_1
@@ -339,6 +340,9 @@ foreach {port pin} {hd_de vid_active_video hd_hsync vid_hsync hd_vsync vid_vsync
 #   Laeuft an FCLK0 (100 MHz, 10 ns Aufloesung), also ohne Taktuebergang zwischen dem
 #   Schreibzugriff und der Zeitmessung. Der IRQ geht an IRQ_F2P[0] des PS (SPI 61).
 #   Register siehe rtl/irq_timer.v
+#   IRQ_F2P[1] (SPI 62): Puls am Anfang jedes Bildes, wenn pattern_gen die Linientabelle
+#   uebernommen hat (Testbild 8, Anwendung vec_demo); frame_irq (Verilog) macht ihn aus dem
+#   Pegelwechsel von frame_tick
 set_property -dict [list CONFIG.PCW_USE_FABRIC_INTERRUPT {1} CONFIG.PCW_IRQ_F2P_INTR {1}] [get_bd_cells ps7]
 create_bd_cell -type module -reference irq_timer irq_timer
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
@@ -347,7 +351,14 @@ apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
 if {[get_bd_nets -of_objects [get_bd_pins irq_timer/aclk]] ne [get_bd_nets -of_objects $fclk]} {
     error "irq_timer laeuft nicht an FCLK0"
 }
-connect_bd_net [get_bd_pins irq_timer/irq] [get_bd_pins ps7/IRQ_F2P]
+create_bd_cell -type ip -vlnv [latest_ip xlconcat] irq_concat
+set_property CONFIG.NUM_PORTS {2} [get_bd_cells irq_concat]
+connect_bd_net [get_bd_pins irq_timer/irq]         [get_bd_pins irq_concat/In0]
+create_bd_cell -type module -reference frame_irq frame_irq
+connect_bd_net $pclk [get_bd_pins frame_irq/aclk]
+connect_bd_net [get_bd_pins pattern_gen/frame_tick] [get_bd_pins frame_irq/tick]
+connect_bd_net [get_bd_pins frame_irq/irq]         [get_bd_pins irq_concat/In1]
+connect_bd_net [get_bd_pins irq_concat/dout]       [get_bd_pins ps7/IRQ_F2P]
 
 # --- OLED-Anzeige (128 x 32, SSD1306): AXI Quad SPI + AXI-GPIO ---------------------
 #   Der SPI-Core liefert nur Takt und Daten (Teiler 16 x 2: 100 MHz / 32 = 3,125 MHz, FIFO mit

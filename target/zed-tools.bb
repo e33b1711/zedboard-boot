@@ -1,11 +1,11 @@
 #
 # Werkzeuge fuer das ZedBoard: Sinuston (Codec-Init, Frequenz), HDMI-Testbild,
 # Testprogramm fuer die Framebuffer, Empfangstest fuer das HackRF und Messung der
-# Interrupt-Laufzeit, Text auf der OLED-Anzeige; dazu der
+# Interrupt-Laufzeit, Text auf der OLED-Anzeige, bewegte Linien fuer Testbild 8; dazu der
 # SSH-Zugang fuer board.sh (fester Host-Schluessel, Schluessel des PCs fuer root)
 #
 
-SUMMARY = "ZedBoard-Werkzeuge: codec_init.sh, set_freq.sh, hdmi_init.sh, set_pattern.sh, set_scope.sh, fb_test, iq_rx, irq_test, oled"
+SUMMARY = "ZedBoard-Werkzeuge: codec_init.sh, set_freq.sh, hdmi_init.sh, set_pattern.sh, set_scope.sh, fb_test, iq_rx, irq_test, oled, vec_demo"
 SECTION = "PETALINUX/apps"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
@@ -21,6 +21,8 @@ SRC_URI = "file://codec_init.sh \
 	   file://oled.c \
 	   file://oled.h \
 	   file://oled_font.h \
+	   file://vec_demo.c \
+	   file://lines.h \
 	   file://uio.conf \
 	   file://authorized_keys \
 	   file://ssh_host_ed25519_key \
@@ -38,6 +40,7 @@ do_compile() {
 	     ${CC} ${CFLAGS} ${LDFLAGS} -o iq_rx ${S}/iq_rx.c -lhackrf -lm -lpthread
 	     ${CC} ${CFLAGS} ${LDFLAGS} -o irq_test ${S}/irq_test.c -lm
 	     ${CC} ${CFLAGS} ${LDFLAGS} -o oled ${S}/oled.c
+	     ${CC} ${CFLAGS} ${LDFLAGS} -o vec_demo ${S}/vec_demo.c -lm
 }
 
 do_install() {
@@ -51,6 +54,7 @@ do_install() {
 	     install -m 0755 iq_rx ${D}/${bindir}
 	     install -m 0755 irq_test ${D}/${bindir}
 	     install -m 0755 oled ${D}/${bindir}
+	     install -m 0755 vec_demo ${D}/${bindir}
 
 	     install -d ${D}/${sysconfdir}/modprobe.d
 	     install -m 0644 ${S}/uio.conf ${D}/${sysconfdir}/modprobe.d
